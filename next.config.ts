@@ -1,6 +1,15 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
+  experimental: {
+    outputFileTracingExcludes: {
+      "*": [
+        "node_modules/drizzle-kit/**",
+        "node_modules/esbuild/**",
+        "node_modules/@esbuild/**",
+      ],
+    },
+  },
   async headers() {
     return [
       {
