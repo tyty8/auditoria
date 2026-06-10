@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { tests, responses } from "@/lib/schema";
+import { tests, responses, invitations, testVersions } from "@/lib/schema";
 import { eq, inArray, sql } from "drizzle-orm";
 import { uid, computeOverallScore } from "@/lib/scoring";
 import { NextRequest, NextResponse } from "next/server";
@@ -44,12 +44,28 @@ export async function GET(req: NextRequest) {
     scoreSumMap[r.testId] = (scoreSumMap[r.testId] ?? 0) + score;
   }
 
+  // Attach invitations and the latest published version number in two queries.
+  const invRows = await db.select().from(invitations).where(inArray(invitations.testId, testIds));
+  const invMap: Record<string, typeof invRows> = {};
+  for (const inv of invRows) {
+    (invMap[inv.testId] ||= []).push(inv);
+  }
+
+  const versionRows = await db
+    .select({ testId: testVersions.testId, latest: sql<number>`max(${testVersions.version})::int` })
+    .from(testVersions)
+    .where(inArray(testVersions.testId, testIds))
+    .groupBy(testVersions.testId);
+  const versionMap = Object.fromEntries(versionRows.map((r) => [r.testId, r.latest]));
+
   const result = allTests.map((t) => {
     const count = countMap[t.id] ?? 0;
     return {
       ...t,
       _responseCount: count,
       _avgScore: count > 0 ? Math.round((scoreSumMap[t.id] ?? 0) / count) : 0,
+      _latestVersion: versionMap[t.id] ?? null,
+      invitations: invMap[t.id] ?? [],
     };
   });
 

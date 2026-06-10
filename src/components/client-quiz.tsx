@@ -1,5 +1,5 @@
 "use client";
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import type { Test } from "@/lib/schema";
 import {
   computeResult,
@@ -14,6 +14,36 @@ import { Icon, ScoreRing, ScoreBar, ScoreBadge } from "@/components/ui";
 import ResultView from "@/components/result-view";
 
 type Stage = "intro" | "quiz" | "submitting" | "result" | "error";
+
+// ---- In-progress draft persistence (survives reloads / crashes) ----
+type Draft = {
+  respondent: string; email: string; company: string; role: string;
+  answers: Record<string, string>; topicIndex: number; savedAt: number;
+};
+
+function draftKey(testId: string) { return `auditoria_quiz_${testId}`; }
+
+function loadDraft(testId: string): Draft | null {
+  try {
+    const raw = localStorage.getItem(draftKey(testId));
+    if (!raw) return null;
+    const d = JSON.parse(raw) as Draft;
+    if (!d || typeof d !== "object" || !d.answers) return null;
+    // Drafts older than 7 days are stale — discard.
+    if (!d.savedAt || Date.now() - d.savedAt > 7 * 24 * 60 * 60 * 1000) return null;
+    return d;
+  } catch { return null; }
+}
+
+function saveDraft(testId: string, d: Omit<Draft, "savedAt">) {
+  try { localStorage.setItem(draftKey(testId), JSON.stringify({ ...d, savedAt: Date.now() })); } catch {}
+}
+
+function clearDraft(testId: string) {
+  try { localStorage.removeItem(draftKey(testId)); } catch {}
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export default function ClientQuiz({ test }: { test: Test }) {
   const branding = test.branding;
@@ -33,6 +63,40 @@ export default function ClientQuiz({ test }: { test: Test }) {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [topicIndex, setTopicIndex] = useState(0);
   const [responseId, setResponseId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const hydrated = useRef(false);
+
+  // Look for a saved draft after mount (localStorage is browser-only).
+  useEffect(() => {
+    setDraft(loadDraft(test.id));
+    hydrated.current = true;
+  }, [test.id]);
+
+  // Persist progress while answering so a crash or accidental close loses nothing.
+  useEffect(() => {
+    if (!hydrated.current) return;
+    if (stage !== "quiz" && stage !== "intro") return;
+    if (Object.keys(answers).length === 0 && !respondent) return;
+    saveDraft(test.id, { respondent, email, company, role, answers, topicIndex });
+  }, [test.id, stage, respondent, email, company, role, answers, topicIndex]);
+
+  function resumeDraft() {
+    if (!draft) return;
+    setRespondent(draft.respondent || "");
+    setEmail(draft.email || "");
+    setCompany(draft.company || "");
+    setRole(draft.role || "");
+    setAnswers(draft.answers || {});
+    setTopicIndex(Math.min(draft.topicIndex || 0, Math.max(0, topics.length - 1)));
+    setStage(draft.respondent ? "quiz" : "intro");
+    setDraft(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function discardDraft() {
+    clearDraft(test.id);
+    setDraft(null);
+  }
 
   // Shuffle options once per question when quiz starts — stable for session
   const shuffledOptions = useMemo(() => {
@@ -74,30 +138,48 @@ export default function ClientQuiz({ test }: { test: Test }) {
 
   async function handleSubmit() {
     setStage("submitting");
-    try {
-      const res = await fetch("/api/responses", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          testId: test.id,
-          respondent: respondent || null,
-          company: company || null,
-          email: email || null,
-          role: role || null,
-          answers,
-          submittedAt: new Date().toISOString(),
-        }),
-      });
-      const data = await res.json();
-      setResponseId(data.id);
-      setStage("result");
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    } catch {
-      setStage("error");
+    const payload = JSON.stringify({
+      testId: test.id,
+      respondent: respondent || null,
+      company: company || null,
+      email: email || null,
+      role: role || null,
+      answers,
+      submittedAt: new Date().toISOString(),
+    });
+
+    // Up to 3 attempts with backoff — transient network blips shouldn't cost
+    // the respondent their whole session. Answers stay in state (and in
+    // localStorage) so the error screen's retry re-sends the same payload.
+    const delays = [0, 800, 2500];
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+      if (delays[attempt]) await sleep(delays[attempt]);
+      try {
+        const res = await fetch("/api/responses", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: payload,
+        });
+        if (!res.ok) {
+          // 4xx won't improve on retry (e.g. test unpublished) — fail fast.
+          if (res.status < 500) break;
+          continue;
+        }
+        const data = await res.json();
+        clearDraft(test.id);
+        setResponseId(data.id);
+        setStage("result");
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      } catch {
+        // network error — retry
+      }
     }
+    setStage("error");
   }
 
   function handleRestart() {
+    clearDraft(test.id);
     setAnswers({});
     setTopicIndex(0);
     setRespondent("");
@@ -191,6 +273,35 @@ export default function ClientQuiz({ test }: { test: Test }) {
         {/* Form */}
         <div style={{ flex: 1, background: "var(--bg)", display: "flex", justifyContent: "center", padding: "40px 24px" }}>
           <div style={{ width: "100%", maxWidth: 480 }}>
+            {draft && Object.keys(draft.answers || {}).length > 0 && (
+              <div
+                className="card"
+                style={{ padding: "16px 18px", marginBottom: 24, border: "1.5px solid var(--brand)", display: "flex", flexDirection: "column", gap: 10 }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <Icon name="refresh" size={18} style={{ color: "var(--brand)", flex: "none" }} />
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>
+                    Tienes un avance guardado
+                  </div>
+                </div>
+                <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
+                  Guardamos {Object.keys(draft.answers).length} respuesta{Object.keys(draft.answers).length !== 1 ? "s" : ""} de una sesión anterior. Puedes continuar donde lo dejaste.
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={resumeDraft}
+                    style={{ background: "var(--brand)", color: "#fff", border: "none", fontWeight: 700 }}
+                  >
+                    Continuar donde lo dejé
+                  </button>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={discardDraft}>
+                    Empezar de nuevo
+                  </button>
+                </div>
+              </div>
+            )}
             <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 8, letterSpacing: "-.015em" }}>
               Antes de empezar
             </h2>
@@ -370,6 +481,8 @@ export default function ClientQuiz({ test }: { test: Test }) {
   // ---- Quiz screen ----
   const progressPct = topics.length > 0 ? ((topicIndex + 1) / topics.length) * 100 : 0;
   const allActiveAnswered = activeQuestions.every((q) => answers[q.id] != null);
+  const allActive = topics.flatMap((t) => t.questions.filter((q) => isQuestionActive(q, answers)));
+  const answeredCount = allActive.filter((q) => answers[q.id] != null).length;
 
   return (
     <div style={{ ...rootStyle, minHeight: "100vh", background: "var(--bg)" }}>
@@ -405,7 +518,7 @@ export default function ClientQuiz({ test }: { test: Test }) {
                 fontWeight: 600,
               }}
             >
-              {Math.round(progressPct)}%
+              {answeredCount} de {allActive.length} preguntas · {Math.round(progressPct)}%
             </div>
           </div>
           {/* Progress track */}

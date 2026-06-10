@@ -1,6 +1,6 @@
 import { db } from "@/lib/db";
-import { responses, tests, invitations } from "@/lib/schema";
-import { eq, and } from "drizzle-orm";
+import { responses, tests, invitations, testVersions } from "@/lib/schema";
+import { eq, and, or, ilike, gte, lte, desc, sql, type SQL } from "drizzle-orm";
 import { uid } from "@/lib/scoring";
 import { NextRequest, NextResponse } from "next/server";
 
@@ -12,26 +12,61 @@ function truncate(v: unknown): string | null {
   return v.slice(0, MAX_FIELD_LEN);
 }
 
+// GET /api/responses
+//   ?testId= | ?mode=  — scope
+//   &q=               — case-insensitive match on respondent / email / company
+//   &from=&to=        — ISO dates (inclusive) on submittedAt
+//   &limit=&offset=   — server-side pagination (omit for the full list)
 export async function GET(req: NextRequest) {
-  const mode = req.nextUrl.searchParams.get("mode");
-  const testId = req.nextUrl.searchParams.get("testId");
+  const p = req.nextUrl.searchParams;
+  const mode = p.get("mode");
+  const testId = p.get("testId");
+  const q = p.get("q");
+  const from = p.get("from");
+  const to = p.get("to");
+  const limit = Math.min(Number(p.get("limit")) || 0, 500);
+  const offset = Math.max(Number(p.get("offset")) || 0, 0);
 
-  if (testId) {
-    const rows = await db.select().from(responses).where(eq(responses.testId, testId));
-    return NextResponse.json(rows);
+  const conditions: SQL[] = [];
+  if (testId) conditions.push(eq(responses.testId, testId));
+  if (q) {
+    const pattern = `%${q.replace(/[%_]/g, "\\$&")}%`;
+    const match = or(
+      ilike(responses.respondent, pattern),
+      ilike(responses.email, pattern),
+      ilike(responses.company, pattern),
+    );
+    if (match) conditions.push(match);
+  }
+  if (from && !Number.isNaN(Date.parse(from))) conditions.push(gte(responses.submittedAt, new Date(from)));
+  if (to && !Number.isNaN(Date.parse(to))) {
+    const end = new Date(to);
+    end.setHours(23, 59, 59, 999);
+    conditions.push(lte(responses.submittedAt, end));
   }
 
-  if (mode) {
-    const rows = await db
+  if (!testId && mode) {
+    let query = db
       .select({ responses })
       .from(responses)
       .innerJoin(tests, eq(responses.testId, tests.id))
-      .where(eq(tests.mode, mode));
+      .where(and(eq(tests.mode, mode), ...conditions))
+      .orderBy(desc(responses.submittedAt))
+      .$dynamic();
+    if (limit > 0) query = query.limit(limit).offset(offset);
+    const rows = await query;
     return NextResponse.json(rows.map((r) => r.responses));
   }
 
-  const all = await db.select().from(responses);
-  return NextResponse.json(all);
+  let query = db
+    .select()
+    .from(responses)
+    .where(conditions.length ? and(...conditions) : undefined)
+    .orderBy(desc(responses.submittedAt))
+    .$dynamic();
+  if (limit > 0) query = query.limit(limit).offset(offset);
+  const rows = await query;
+  return NextResponse.json(rows);
 }
 
 export async function POST(req: NextRequest) {
@@ -66,6 +101,12 @@ export async function POST(req: NextRequest) {
   // Always generate submittedAt server-side — never trust the client timestamp.
   const submittedAt = new Date();
 
+  // Stamp the response with the currently published version of the instrument.
+  const [latestVersion] = await db
+    .select({ version: sql<number>`max(${testVersions.version})::int` })
+    .from(testVersions)
+    .where(eq(testVersions.testId, testId));
+
   await db.insert(responses).values({
     id,
     testId,
@@ -75,6 +116,7 @@ export async function POST(req: NextRequest) {
     role: truncate(role),
     answers: safeAnswers,
     submittedAt,
+    testVersion: latestVersion?.version ?? null,
   });
 
   // Auto-complete invitation by email match.

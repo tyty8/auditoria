@@ -3,12 +3,14 @@ import React, { useMemo } from "react";
 import { useStore } from "@/components/store";
 import { Icon, ScoreRing, ScoreBar, ScoreBadge, Avatar, EmptyState, PageWrap } from "@/components/ui";
 import { computeResult, scoreBucket, SCORE_HEX, tierLabel, SCORE_LABEL } from "@/lib/scoring";
+import { TrendChart, DeltaBadge, monthlyAverages } from "@/components/trend-chart";
+import { NotesPanel } from "@/components/notes-panel";
 import type { Solution } from "@/lib/schema";
 
 type NavFn = (name: string, params?: Record<string, string>) => void;
 
 export default function ClienteDetailPage({ company, nav }: { company: string; nav: NavFn }) {
-  const { tests, responses, modeConfig } = useStore();
+  const { tests, responses, modeConfig, mode } = useStore();
 
   const entityResponses = useMemo(
     () => responses.filter((r) => (r.company || "Sin asignar") === company),
@@ -76,6 +78,22 @@ export default function ClienteDetailPage({ company, nav }: { company: string; n
     return sols;
   }, [tests, entityResponses]);
 
+  // Score-over-time: average overall score per month across all questionnaires.
+  const trend = useMemo(() => {
+    const scored: { submittedAt?: string | null; score: number }[] = [];
+    entityResponses.forEach((r) => {
+      const test = tests.find((t) => t.id === r.testId);
+      if (!test) return;
+      scored.push({
+        submittedAt: r.submittedAt,
+        score: computeResult(test.topics || [], test.solutions || [], r.answers || {}).overall,
+      });
+    });
+    return monthlyAverages(scored);
+  }, [tests, entityResponses]);
+
+  const trendDelta = trend.length >= 2 ? trend[trend.length - 1].value - trend[trend.length - 2].value : 0;
+
   const history = useMemo(() => {
     return [...entityResponses]
       .map((r) => {
@@ -117,6 +135,7 @@ export default function ClienteDetailPage({ company, nav }: { company: string; n
             <span className={"badge badge-" + bucket} style={{ fontSize: 13 }}>{tierLabel(overallData.avg)}</span>
             <span className="badge">{overallData.count} evaluaci{overallData.count === 1 ? "ón" : "ones"}</span>
             <span className="badge" style={{ color }}>{SCORE_LABEL[bucket]}</span>
+            {trend.length >= 2 && <DeltaBadge delta={trendDelta} />}
           </div>
         </div>
       </div>
@@ -125,6 +144,22 @@ export default function ClienteDetailPage({ company, nav }: { company: string; n
         <EmptyState icon="clipboard" title="Sin evaluaciones" sub="Aún no hay evaluaciones para esta entidad." />
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+          {/* Evolution over time */}
+          {trend.length >= 2 && (
+            <section>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+                <h2 style={{ fontSize: 17, fontWeight: 700 }}>Evolución del puntaje</h2>
+                <DeltaBadge delta={trendDelta} />
+              </div>
+              <div className="card" style={{ padding: "18px 20px" }}>
+                <TrendChart points={trend} />
+                <div style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 8 }}>
+                  Promedio mensual de todas las evaluaciones de {company}.
+                </div>
+              </div>
+            </section>
+          )}
+
           {/* Per-questionnaire breakdown */}
           {testBreakdowns.length > 0 && (
             <section>
@@ -196,6 +231,12 @@ export default function ClienteDetailPage({ company, nav }: { company: string; n
               </div>
             </section>
           )}
+
+          {/* Consultant notes */}
+          <section>
+            <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 14 }}>Notas del consultor</h2>
+            <NotesPanel company={company} mode={mode} />
+          </section>
 
           {/* Response history */}
           <section>

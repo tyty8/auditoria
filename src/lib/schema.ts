@@ -1,4 +1,4 @@
-import { pgTable, text, jsonb, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, text, jsonb, timestamp, index, integer, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const tests = pgTable("tests", {
   id: text("id").primaryKey(),
@@ -24,6 +24,9 @@ export const responses = pgTable("responses", {
   role: text("role"),
   submittedAt: timestamp("submitted_at").defaultNow(),
   answers: jsonb("answers").$type<Record<string, string>>().default({}),
+  // Version of the test (snapshot in test_versions) that was live when this
+  // response was submitted. Null for responses predating versioning.
+  testVersion: integer("test_version"),
 }, (t) => [index("responses_test_idx").on(t.testId)]);
 
 export const invitations = pgTable("invitations", {
@@ -34,6 +37,7 @@ export const invitations = pgTable("invitations", {
   company: text("company"),
   status: text("status").default("pendiente"),
   sentAt: timestamp("sent_at"),
+  lastReminderAt: timestamp("last_reminder_at"),
 }, (t) => [index("invitations_test_idx").on(t.testId)]);
 
 export const taskActions = pgTable("task_actions", {
@@ -43,8 +47,33 @@ export const taskActions = pgTable("task_actions", {
   entityName: text("entity_name").notNull(),
   status: text("status").default("pendiente"),
   assignee: text("assignee"),
+  dueDate: text("due_date"), // YYYY-MM-DD
+  priority: text("priority").default("media"), // "alta" | "media" | "baja"
   updatedAt: timestamp("updated_at").defaultNow(),
 }, (t) => [index("task_actions_entity_idx").on(t.entityName)]);
+
+// Immutable snapshot of a test's questions/solutions taken each time it is
+// published with changes. Responses are stamped with the version they answered,
+// so historical scores stay comparable even after the instrument is edited.
+export const testVersions = pgTable("test_versions", {
+  id: text("id").primaryKey(),
+  testId: text("test_id").notNull().references(() => tests.id, { onDelete: "cascade" }),
+  version: integer("version").notNull(),
+  name: text("name").notNull(),
+  topics: jsonb("topics").$type<Topic[]>().default([]),
+  solutions: jsonb("solutions").$type<Solution[]>().default([]),
+  publishedAt: timestamp("published_at").defaultNow(),
+}, (t) => [index("test_versions_test_idx").on(t.testId)]);
+
+export const users = pgTable("users", {
+  id: text("id").primaryKey(),
+  email: text("email").notNull(),
+  name: text("name"),
+  passwordHash: text("password_hash").notNull(),
+  role: text("role").notNull().default("consultor"), // "admin" | "consultor" | "viewer"
+  company: text("company"), // optional scope for viewer accounts
+  createdAt: timestamp("created_at").defaultNow(),
+}, (t) => [uniqueIndex("users_email_idx").on(t.email)]);
 
 export const consultantNotes = pgTable("consultant_notes", {
   id: text("id").primaryKey(),
@@ -77,3 +106,6 @@ export type Test = typeof tests.$inferSelect;
 export type Response = typeof responses.$inferSelect;
 export type Invitation = typeof invitations.$inferSelect;
 export type TaskAction = typeof taskActions.$inferSelect;
+export type TestVersion = typeof testVersions.$inferSelect;
+export type User = typeof users.$inferSelect;
+export type UserRole = "admin" | "consultor" | "viewer";

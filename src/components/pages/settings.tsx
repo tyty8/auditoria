@@ -1,11 +1,172 @@
 "use client";
-import React, { useState } from "react";
-import { PageWrap, Icon } from "@/components/ui";
+import React, { useState, useEffect, useCallback } from "react";
+import { PageWrap, Icon, Avatar, EmptyState } from "@/components/ui";
 import { MODE_CONFIG } from "@/lib/modes";
 import type { ModeId } from "@/lib/modes";
 
 type NavFn = (name: string, params?: Record<string, string>) => void;
 type ToastFn = (msg: string, icon?: string) => void;
+
+type UserRow = { id: string; email: string; name?: string | null; role: string; company?: string | null };
+type Me = { sub: string; role: string; name?: string | null };
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: "Administrador",
+  consultor: "Consultor",
+  viewer: "Solo lectura",
+};
+
+// ---- Users & access section ----
+function UsersSection({ toast }: { toast: ToastFn }) {
+  const [me, setMe] = useState<Me | null>(null);
+  const [usersList, setUsersList] = useState<UserRow[] | null>(null);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [role, setRole] = useState("consultor");
+  const [saving, setSaving] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const res = await fetch("/api/users");
+      if (res.ok) setUsersList(await res.json());
+      else setUsersList([]);
+    } catch {
+      setUsersList([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/auth/me").then((r) => r.json()).then(setMe).catch(() => {});
+    refresh();
+  }, [refresh]);
+
+  const isAdmin = me?.role === "admin";
+
+  async function handleCreate(e: React.FormEvent) {
+    e.preventDefault();
+    setSaving(true);
+    try {
+      const res = await fetch("/api/users", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ name, email, password, role }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        toast("Usuario creado", "check2");
+        setName(""); setEmail(""); setPassword(""); setRole("consultor");
+        await refresh();
+      } else {
+        toast(data.error || "Error al crear usuario", "alert");
+      }
+    } catch {
+      toast("Error de red", "alert");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleRoleChange(user: UserRow, newRole: string) {
+    const res = await fetch(`/api/users/${user.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role: newRole }),
+    });
+    if (res.ok) { toast("Rol actualizado", "check2"); await refresh(); }
+    else toast("Error al actualizar", "alert");
+  }
+
+  async function handleDelete(user: UserRow) {
+    if (!confirm(`¿Eliminar al usuario ${user.email}?`)) return;
+    const res = await fetch(`/api/users/${user.id}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) { toast("Usuario eliminado", "trash"); await refresh(); }
+    else toast(data.error || "Error al eliminar", "alert");
+  }
+
+  return (
+    <section style={{ maxWidth: 720, marginBottom: 40 }}>
+      <div style={{ marginBottom: 18 }}>
+        <h2 style={{ fontSize: 17, fontWeight: 700, marginBottom: 6 }}>Usuarios y acceso</h2>
+        <p style={{ color: "var(--ink-2)", fontSize: 14 }}>
+          Crea cuentas individuales con roles: <strong>Administrador</strong> (todo, incluida esta sección),{" "}
+          <strong>Consultor</strong> (gestión diaria) y <strong>Solo lectura</strong> (puede ver, no modificar).
+          La contraseña maestra (<code>ADMIN_PASSWORD</code>) sigue funcionando como acceso de administrador.
+        </p>
+      </div>
+
+      {isAdmin && (
+        <div className="card" style={{ padding: "18px 20px", marginBottom: 16 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 14 }}>Agregar usuario</h3>
+          <form onSubmit={handleCreate} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <div>
+                <label className="field-label">Nombre</label>
+                <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Ana García" style={{ fontSize: 13 }} />
+              </div>
+              <div>
+                <label className="field-label">Email <span style={{ color: "var(--bad)" }}>*</span></label>
+                <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="ana@empresa.com" required style={{ fontSize: 13 }} />
+              </div>
+              <div>
+                <label className="field-label">Contraseña <span style={{ color: "var(--bad)" }}>*</span></label>
+                <input className="input" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Mínimo 8 caracteres" required minLength={8} style={{ fontSize: 13 }} autoComplete="new-password" />
+              </div>
+              <div>
+                <label className="field-label">Rol</label>
+                <select className="select" value={role} onChange={(e) => setRole(e.target.value)} style={{ fontSize: 13, width: "100%" }}>
+                  {Object.entries(ROLE_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                </select>
+              </div>
+            </div>
+            <div>
+              <button type="submit" className="btn btn-primary btn-sm" disabled={saving || !email || password.length < 8}>
+                <Icon name="plus" size={14} /> {saving ? "Creando…" : "Crear usuario"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {usersList === null ? (
+        <div style={{ padding: 20, color: "var(--ink-3)", fontSize: 13 }}>Cargando usuarios…</div>
+      ) : usersList.length === 0 ? (
+        <EmptyState icon="users" title="Sin usuarios individuales" sub="Solo existe la contraseña maestra. Crea cuentas para tu equipo arriba." />
+      ) : (
+        <div className="card" style={{ overflow: "hidden" }}>
+          {usersList.map((u, i) => (
+            <div key={u.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 18px", borderBottom: i < usersList.length - 1 ? "1px solid var(--line)" : "none" }}>
+              <Avatar name={u.name || u.email} size={32} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 14 }}>{u.name || u.email}</div>
+                <div style={{ fontSize: 12.5, color: "var(--ink-3)" }}>{u.email}</div>
+              </div>
+              {isAdmin ? (
+                <select
+                  className="select"
+                  value={u.role}
+                  onChange={(e) => handleRoleChange(u, e.target.value)}
+                  style={{ fontSize: 12.5, width: 140 }}
+                  disabled={u.id === me?.sub}
+                >
+                  {Object.entries(ROLE_LABELS).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
+                </select>
+              ) : (
+                <span className="badge">{ROLE_LABELS[u.role] || u.role}</span>
+              )}
+              {isAdmin && u.id !== me?.sub && (
+                <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={() => handleDelete(u)} title="Eliminar usuario" style={{ padding: 5, width: 28, height: 28 }}>
+                  <Icon name="trash" size={14} />
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
 
 const MODES = Object.values(MODE_CONFIG) as (typeof MODE_CONFIG[ModeId])[];
 
@@ -60,6 +221,9 @@ export default function SettingsPage({ nav, toast }: { nav: NavFn; toast: ToastF
           Herramientas de administración y gestión de datos de la plataforma.
         </p>
       </div>
+
+      {/* Users & access */}
+      <UsersSection toast={toast} />
 
       {/* Demo data section */}
       <section style={{ maxWidth: 720 }}>

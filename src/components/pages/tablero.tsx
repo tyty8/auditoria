@@ -3,6 +3,7 @@ import React, { useMemo, useState } from "react";
 import { useStore } from "@/components/store";
 import { Icon, ScoreBar, ScoreBadge, Avatar, EmptyState, PageWrap } from "@/components/ui";
 import { computeResult, scoreBucket, SCORE_HEX, SCORE_LABEL, tierLabel } from "@/lib/scoring";
+import { DeltaBadge, monthlyAverages } from "@/components/trend-chart";
 
 type NavFn = (name: string, params?: Record<string, string>) => void;
 type ToastFn = (msg: string, icon?: string) => void;
@@ -14,6 +15,7 @@ type EntityRow = {
   avg: number;
   bucket: "good" | "warn" | "bad";
   totalResponses: number;
+  delta: number | null; // last month vs. previous month, null when <2 months of data
   testScores: { testId: string; testName: string; avg: number; bucket: "good" | "warn" | "bad" }[];
 };
 
@@ -24,16 +26,17 @@ export default function TableroPage({ nav, toast }: { nav: NavFn; toast: ToastFn
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("todos");
 
   const entities = useMemo((): EntityRow[] => {
-    const map: Record<string, { name: string; testScoreMap: Record<string, number[]>; totalResponses: number }> = {};
+    const map: Record<string, { name: string; testScoreMap: Record<string, number[]>; totalResponses: number; scored: { submittedAt?: string | null; score: number }[] }> = {};
     responses.forEach((r) => {
       const key = r.company || "Sin asignar";
-      if (!map[key]) map[key] = { name: key, testScoreMap: {}, totalResponses: 0 };
+      if (!map[key]) map[key] = { name: key, testScoreMap: {}, totalResponses: 0, scored: [] };
       map[key].totalResponses++;
       const test = tests.find((t) => t.id === r.testId);
       if (!test) return;
       const result = computeResult(test.topics || [], test.solutions || [], r.answers || {});
       if (!map[key].testScoreMap[r.testId]) map[key].testScoreMap[r.testId] = [];
       map[key].testScoreMap[r.testId].push(result.overall);
+      map[key].scored.push({ submittedAt: r.submittedAt, score: result.overall });
     });
 
     return Object.values(map).map((e) => {
@@ -44,7 +47,9 @@ export default function TableroPage({ nav, toast }: { nav: NavFn; toast: ToastFn
       });
       const allScores = testScores.map((t) => t.avg);
       const avg = allScores.length > 0 ? Math.round(allScores.reduce((a, b) => a + b, 0) / allScores.length) : 0;
-      return { name: e.name, avg, bucket: scoreBucket(avg), totalResponses: e.totalResponses, testScores };
+      const trend = monthlyAverages(e.scored);
+      const delta = trend.length >= 2 ? trend[trend.length - 1].value - trend[trend.length - 2].value : null;
+      return { name: e.name, avg, bucket: scoreBucket(avg), totalResponses: e.totalResponses, delta, testScores };
     }).sort((a, b) => a.avg - b.avg);
   }, [tests, responses]);
 
@@ -314,6 +319,7 @@ export default function TableroPage({ nav, toast }: { nav: NavFn; toast: ToastFn
                       <ScoreBar value={e.avg} height={6} />
                     </div>
                     <div style={{ flex: "none", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                      {e.delta != null && e.delta !== 0 && <DeltaBadge delta={e.delta} />}
                       {e.testScores.map((ts) => (
                         <span key={ts.testId} className={"badge badge-" + ts.bucket} style={{ fontSize: 10, padding: "2px 7px" }} title={ts.testName}>
                           {ts.avg}

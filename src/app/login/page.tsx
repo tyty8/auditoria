@@ -3,6 +3,7 @@ import React, { useState, FormEvent } from "react";
 import { Brand } from "@/components/topbar";
 
 export default function LoginPage() {
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -15,12 +16,12 @@ export default function LoginPage() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ email: email.trim() || undefined, password }),
       });
       if (res.ok) {
         window.location.href = "/";
       } else {
-        setError("Contraseña incorrecta.");
+        setError(email.trim() ? "Credenciales incorrectas." : "Contraseña incorrecta.");
         setPassword("");
       }
     } catch {
@@ -37,11 +38,23 @@ export default function LoginPage() {
           <Brand size={32} />
         </div>
         <div className="card" style={{ padding: "32px 28px" }}>
-          <h1 style={{ fontSize: 20, fontWeight: 800, marginBottom: 6, letterSpacing: "-.02em" }}>Acceso de administrador</h1>
+          <h1 style={{ fontSize: 20, fontWeight: 800, marginBottom: 6, letterSpacing: "-.02em" }}>Iniciar sesión</h1>
           <p style={{ fontSize: 13.5, color: "var(--ink-3)", marginBottom: 24, lineHeight: 1.5 }}>
-            Introduce la contraseña para continuar.
+            Entra con tu cuenta, o deja el email vacío para usar la contraseña maestra.
           </p>
           <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <div>
+              <label className="field-label">Email</label>
+              <input
+                className="input"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="tu@empresa.com (opcional)"
+                autoFocus
+                autoComplete="username"
+              />
+            </div>
             <div>
               <label className="field-label">Contraseña</label>
               <input
@@ -51,7 +64,6 @@ export default function LoginPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
                 required
-                autoFocus
                 autoComplete="current-password"
               />
             </div>

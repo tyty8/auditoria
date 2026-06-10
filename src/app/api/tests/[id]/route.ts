@@ -1,9 +1,10 @@
 import { db } from "@/lib/db";
-import { tests } from "@/lib/schema";
-import { eq } from "drizzle-orm";
+import { tests, testVersions } from "@/lib/schema";
+import { eq, desc } from "drizzle-orm";
 import type { InferInsertModel } from "drizzle-orm";
 import { NextRequest, NextResponse } from "next/server";
-import type { Solution } from "@/lib/schema";
+import { uid } from "@/lib/scoring";
+import type { Solution, Topic } from "@/lib/schema";
 
 // Only allow these columns to be patched — prevents mass assignment.
 const ALLOWED_PATCH_FIELDS = [
@@ -72,6 +73,35 @@ export async function PATCH(
 
   const updated = await db.select().from(tests).where(eq(tests.id, id));
   if (updated.length === 0) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
+  // On publish, snapshot the instrument (questions + solutions) as an immutable
+  // version so historical responses stay comparable after later edits.
+  // Only creates a new version when the content actually changed.
+  if (patch.status === "publicado") {
+    const t = updated[0];
+    const [latest] = await db
+      .select()
+      .from(testVersions)
+      .where(eq(testVersions.testId, id))
+      .orderBy(desc(testVersions.version))
+      .limit(1);
+
+    const fingerprint = JSON.stringify({ topics: t.topics, solutions: t.solutions });
+    const latestFingerprint = latest ? JSON.stringify({ topics: latest.topics, solutions: latest.solutions }) : null;
+
+    if (fingerprint !== latestFingerprint) {
+      await db.insert(testVersions).values({
+        id: uid("tv"),
+        testId: id,
+        version: (latest?.version ?? 0) + 1,
+        name: t.name,
+        topics: (t.topics as Topic[]) || [],
+        solutions: (t.solutions as Solution[]) || [],
+        publishedAt: new Date(),
+      });
+    }
+  }
+
   return NextResponse.json(updated[0]);
 }
 

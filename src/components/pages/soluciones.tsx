@@ -19,6 +19,24 @@ const STATUS_LABELS: Record<TaskStatus, string> = {
   hecho: "Hecho",
 };
 
+type TaskPriority = "alta" | "media" | "baja";
+
+const PRIORITY_LABELS: Record<TaskPriority, string> = {
+  alta: "Alta",
+  media: "Media",
+  baja: "Baja",
+};
+
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function isOverdue(taskRow: TaskActionRow | undefined): boolean {
+  if (!taskRow?.dueDate) return false;
+  if (taskRow.status === "hecho") return false;
+  return taskRow.dueDate < todayStr();
+}
+
 type EntityAction = {
   key: string;
   entityName: string;
@@ -36,6 +54,7 @@ export default function SolucionesPage({ nav, toast }: { nav: NavFn; toast: Toas
   const [showDoneForEntity, setShowDoneForEntity] = useState<Record<string, boolean>>({});
   const [completedSearch, setCompletedSearch] = useState("");
   const [completedSort, setCompletedSort] = useState<"name" | "score" | "actions">("name");
+  const [overdueOnly, setOverdueOnly] = useState(false);
 
   useEffect(() => {
     try {
@@ -70,32 +89,32 @@ export default function SolucionesPage({ nav, toast }: { nav: NavFn; toast: Toas
     return result;
   }, [tests, responses, taskActions]);
 
-  async function updateTaskStatus(action: EntityAction, status: TaskStatus) {
+  async function updateTask(action: EntityAction, patch: Partial<Pick<TaskActionRow, "status" | "assignee" | "dueDate" | "priority">>) {
     const existing = action.taskRow;
     await upsertTaskAction({
       id: existing?.id,
       entityName: action.entityName,
       testId: action.testId,
       solutionId: action.solutionId,
-      status,
-      assignee: existing?.assignee || null,
+      status: patch.status ?? ((existing?.status as TaskStatus) || "pendiente"),
+      assignee: patch.assignee !== undefined ? patch.assignee : (existing?.assignee || null),
+      dueDate: patch.dueDate !== undefined ? patch.dueDate : (existing?.dueDate || null),
+      priority: patch.priority !== undefined ? patch.priority : (existing?.priority || "media"),
     });
-    if (status === "hecho") toast("Marcado como hecho", "check2");
+    if (patch.status === "hecho") toast("Marcado como hecho", "check2");
+  }
+
+  async function updateTaskStatus(action: EntityAction, status: TaskStatus) {
+    await updateTask(action, { status });
   }
 
   async function updateTaskAssignee(action: EntityAction, assignee: string) {
-    const existing = action.taskRow;
-    await upsertTaskAction({
-      id: existing?.id,
-      entityName: action.entityName,
-      testId: action.testId,
-      solutionId: action.solutionId,
-      status: (existing?.status as TaskStatus) || "pendiente",
-      assignee,
-    });
+    await updateTask(action, { assignee });
   }
 
-  const openActions = allActions.filter((a) => (a.taskRow?.status as TaskStatus | undefined) !== "hecho");
+  const allOpenActions = allActions.filter((a) => (a.taskRow?.status as TaskStatus | undefined) !== "hecho");
+  const overdueCount = allOpenActions.filter((a) => isOverdue(a.taskRow)).length;
+  const openActions = overdueOnly ? allOpenActions.filter((a) => isOverdue(a.taskRow)) : allOpenActions;
   const doneActions = allActions.filter((a) => (a.taskRow?.status as TaskStatus | undefined) === "hecho");
 
   const openByEntity = useMemo(() => {
@@ -180,6 +199,17 @@ export default function SolucionesPage({ nav, toast }: { nav: NavFn; toast: Toas
           </button>
         </div>
 
+        {overdueCount > 0 && (
+          <button
+            type="button"
+            className={"btn btn-sm " + (overdueOnly ? "btn-primary" : "btn-secondary")}
+            onClick={() => setOverdueOnly((v) => !v)}
+            style={overdueOnly ? {} : { color: "var(--bad)", borderColor: "var(--bad)" }}
+          >
+            <Icon name="alert" size={13} /> {overdueCount} atrasada{overdueCount !== 1 ? "s" : ""}
+          </button>
+        )}
+
         <div style={{ display: "flex", gap: 0, borderBottom: "2px solid var(--line)" }}>
           {([["open", "Abiertas"], ["done", "Completados"]] as const).map(([id, label]) => {
             const count = id === "open" ? openActions.length : completedEntities.length;
@@ -252,7 +282,7 @@ export default function SolucionesPage({ nav, toast }: { nav: NavFn; toast: Toas
 
                     <div style={{ padding: "10px 0" }}>
                       {pendingHere.map((action) => (
-                        <ActionItem key={action.key} action={action} onUpdateStatus={updateTaskStatus} onUpdateAssignee={updateTaskAssignee} />
+                        <ActionItem key={action.key} action={action} onUpdateStatus={updateTaskStatus} onUpdateAssignee={updateTaskAssignee} onUpdateTask={updateTask} />
                       ))}
                       {doneHere.length > 0 && (
                         <div style={{ padding: "6px 18px" }}>
@@ -266,7 +296,7 @@ export default function SolucionesPage({ nav, toast }: { nav: NavFn; toast: Toas
                             {showDone ? "Ocultar" : `Mostrar ${doneHere.length} completada${doneHere.length !== 1 ? "s" : ""}`}
                           </button>
                           {showDone && doneHere.map((action) => (
-                            <ActionItem key={action.key} action={action} onUpdateStatus={updateTaskStatus} onUpdateAssignee={updateTaskAssignee} done />
+                            <ActionItem key={action.key} action={action} onUpdateStatus={updateTaskStatus} onUpdateAssignee={updateTaskAssignee} onUpdateTask={updateTask} done />
                           ))}
                         </div>
                       )}
@@ -361,7 +391,7 @@ export default function SolucionesPage({ nav, toast }: { nav: NavFn; toast: Toas
                     </div>
                     <div style={{ padding: "8px 0" }}>
                       {done.map((action) => (
-                        <ActionItem key={action.key} action={action} onUpdateStatus={updateTaskStatus} onUpdateAssignee={updateTaskAssignee} done />
+                        <ActionItem key={action.key} action={action} onUpdateStatus={updateTaskStatus} onUpdateAssignee={updateTaskAssignee} onUpdateTask={updateTask} done />
                       ))}
                     </div>
                   </div>
@@ -380,11 +410,13 @@ function ActionItem({
   action,
   onUpdateStatus,
   onUpdateAssignee,
+  onUpdateTask,
   done = false,
 }: {
   action: EntityAction;
   onUpdateStatus: (a: EntityAction, s: TaskStatus) => void;
   onUpdateAssignee: (a: EntityAction, assignee: string) => void;
+  onUpdateTask: (a: EntityAction, patch: Partial<Pick<TaskActionRow, "status" | "assignee" | "dueDate" | "priority">>) => void;
   done?: boolean;
 }) {
   const [assigneeVal, setAssigneeVal] = useState(action.taskRow?.assignee || "");
@@ -397,6 +429,9 @@ function ActionItem({
   }
 
   const status = (action.taskRow?.status as TaskStatus) || "pendiente";
+  const priority = (action.taskRow?.priority as TaskPriority) || "media";
+  const dueDate = action.taskRow?.dueDate || "";
+  const overdue = isOverdue(action.taskRow);
 
   return (
     <div
@@ -408,6 +443,7 @@ function ActionItem({
         borderBottom: "1px solid var(--line)",
         opacity: done ? 0.6 : 1,
         background: done ? "var(--surface-sunken)" : "",
+        borderLeft: overdue ? "3px solid var(--bad)" : "3px solid transparent",
       }}
     >
       <div style={{ flex: 1, minWidth: 0 }}>
@@ -417,11 +453,38 @@ function ActionItem({
           </span>
           {action.solution.category && <span className="tagmini">{action.solution.category}</span>}
           <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>{action.testName}</span>
+          {priority === "alta" && !done && (
+            <span className="badge badge-bad" style={{ fontSize: 10.5 }}>Alta</span>
+          )}
+          {overdue && (
+            <span className="badge badge-bad" style={{ fontSize: 10.5 }}>
+              <Icon name="alert" size={11} /> Atrasada
+            </span>
+          )}
         </div>
         {action.solution.description && (
           <p style={{ fontSize: 12.5, color: "var(--ink-2)", margin: 0, lineHeight: 1.4 }}>{action.solution.description}</p>
         )}
       </div>
+      <select
+        className="input"
+        value={priority}
+        onChange={(e) => onUpdateTask(action, { priority: e.target.value as TaskPriority })}
+        title="Prioridad"
+        style={{ width: 84, fontSize: 12, flex: "none", color: priority === "alta" ? "var(--bad)" : priority === "baja" ? "var(--ink-3)" : "var(--warn)", fontWeight: 700 }}
+      >
+        {(Object.entries(PRIORITY_LABELS) as [TaskPriority, string][]).map(([k, l]) => (
+          <option key={k} value={k}>{l}</option>
+        ))}
+      </select>
+      <input
+        className="input"
+        type="date"
+        value={dueDate}
+        onChange={(e) => onUpdateTask(action, { dueDate: e.target.value || null })}
+        title="Fecha límite"
+        style={{ width: 138, fontSize: 12, flex: "none", color: overdue ? "var(--bad)" : "var(--ink-2)" }}
+      />
       <input
         className="input"
         placeholder="Responsable"

@@ -3,6 +3,7 @@ import React, { useState, useCallback, useRef, useMemo, useEffect } from "react"
 import { useStore } from "@/components/store";
 import type { TestSummary, InvitationRow } from "@/components/store";
 import { Icon, EmptyState, PageWrap, Modal } from "@/components/ui";
+import { ShareModal } from "@/components/share-modal";
 import { uid } from "@/lib/scoring";
 import type { Topic, Question, Option, Solution, Condition, Branding } from "@/lib/schema";
 
@@ -674,14 +675,39 @@ function InvStatusBadge({ status }: { status: string }) {
 }
 
 // ---- Distribución tab ----
-function DistribucionTab({ test, testId, toast }: { test: TestSummary; testId: string; toast: ToastFn }) {
-  const { addInvitation, deleteInvitation } = useStore();
+function DistribucionTab({ test, testId, toast, onShare }: { test: TestSummary; testId: string; toast: ToastFn; onShare: () => void }) {
+  const { addInvitation, deleteInvitation, sendInvitation, sendPendingInvitations } = useStore();
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [saving, setSaving] = useState(false);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [bulkSending, setBulkSending] = useState(false);
   const shareUrl = typeof window !== "undefined" ? `${window.location.origin}/q/${testId}` : `/q/${testId}`;
   const invitations: InvitationRow[] = test.invitations || [];
+  const pendingCount = invitations.filter((i) => i.status === "pendiente" && i.email).length;
+
+  async function handleSend(inv: InvitationRow, reminder = false) {
+    setSendingId(inv.id);
+    try {
+      const result = await sendInvitation(inv.id, reminder);
+      if (result.ok) toast(reminder ? "Recordatorio enviado" : "Invitación enviada", "send");
+      else toast(result.error || "Error al enviar", "alert");
+    } finally {
+      setSendingId(null);
+    }
+  }
+
+  async function handleBulkSend() {
+    setBulkSending(true);
+    try {
+      const result = await sendPendingInvitations(testId);
+      if (result.ok) toast(`${result.sent} enviada${result.sent !== 1 ? "s" : ""}${result.failed ? `, ${result.failed} con error` : ""}`, "send");
+      else toast(result.error || "Error al enviar", "alert");
+    } finally {
+      setBulkSending(false);
+    }
+  }
 
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault();
@@ -733,6 +759,9 @@ function DistribucionTab({ test, testId, toast }: { test: TestSummary; testId: s
             <button type="button" className="btn btn-secondary btn-sm" onClick={copyLink}>
               <Icon name="copy" size={14} /> Copiar
             </button>
+            <button type="button" className="btn btn-secondary btn-sm" onClick={onShare}>
+              <Icon name="share" size={14} /> QR / Compartir
+            </button>
             <a
               href={shareUrl}
               target="_blank"
@@ -774,9 +803,16 @@ function DistribucionTab({ test, testId, toast }: { test: TestSummary; testId: s
 
       {/* Invitation list */}
       <div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <h3 style={{ fontSize: 16, fontWeight: 700 }}>Invitaciones</h3>
-          <span className="badge">{invitations.length}</span>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <h3 style={{ fontSize: 16, fontWeight: 700 }}>Invitaciones</h3>
+            <span className="badge">{invitations.length}</span>
+          </div>
+          {pendingCount > 0 && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={handleBulkSend} disabled={bulkSending}>
+              <Icon name="send" size={13} /> {bulkSending ? "Enviando…" : `Enviar ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""}`}
+            </button>
+          )}
         </div>
         {invitations.length === 0 ? (
           <EmptyState icon="send" title="Sin invitaciones" sub="Agrega emails arriba para enviar invitaciones directas." />
@@ -792,6 +828,16 @@ function DistribucionTab({ test, testId, toast }: { test: TestSummary; testId: s
                   </div>
                 </div>
                 <InvStatusBadge status={inv.status} />
+                {inv.email && inv.status === "pendiente" && (
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => handleSend(inv)} disabled={sendingId === inv.id} title="Enviar invitación por email">
+                    <Icon name="send" size={13} /> {sendingId === inv.id ? "Enviando…" : "Enviar"}
+                  </button>
+                )}
+                {inv.email && inv.status === "enviada" && (
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleSend(inv, true)} disabled={sendingId === inv.id} title="Enviar recordatorio">
+                    <Icon name="refresh" size={13} /> {sendingId === inv.id ? "Enviando…" : "Recordar"}
+                  </button>
+                )}
                 <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={() => handleDelete(inv.id)} title="Eliminar invitación">
                   <Icon name="trash" size={14} />
                 </button>
@@ -908,6 +954,7 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
   const storeTest = store.getTest(testId);
   const [test, setTest] = useState<TestSummary | null>(storeTest || null);
   const [tab, setTab] = useState<TabId>("temas");
+  const [shareOpen, setShareOpen] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPatch = useRef<Partial<TestSummary>>({});
 
@@ -982,11 +1029,19 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
           />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "none" }}>
+          {test._latestVersion != null && (
+            <span className="badge mono" title="Versión publicada del instrumento" style={{ fontSize: 11 }}>
+              v{test._latestVersion}
+            </span>
+          )}
           <Seg
             options={[{ label: "Borrador", value: "borrador" }, { label: "Publicado", value: "publicado" }]}
             value={test.status || "borrador"}
             onChange={(v) => handleUpdate({ status: v }, true)}
           />
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShareOpen(true)}>
+            <Icon name="share" size={14} /> Compartir
+          </button>
           <a
             href={shareUrl}
             target="_blank"
@@ -1028,8 +1083,17 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
       {/* Tab content */}
       {tab === "temas" && <TemasTab test={test} onUpdate={(patch) => handleUpdate(patch)} />}
       {tab === "soluciones" && <SolucionesTab test={test} onUpdate={(patch) => handleUpdate(patch, true)} />}
-      {tab === "distribucion" && <DistribucionTab test={test} testId={testId} toast={toast} />}
+      {tab === "distribucion" && <DistribucionTab test={test} testId={testId} toast={toast} onShare={() => setShareOpen(true)} />}
       {tab === "marca" && <MarcaTab test={test} onUpdate={(patch) => handleUpdate(patch)} />}
+
+      <ShareModal
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+        url={shareUrl}
+        testName={test.name}
+        accent={test.branding?.accent || test.accent}
+        toast={toast}
+      />
     </PageWrap>
   );
 }

@@ -1,8 +1,9 @@
 "use client";
-import React, { useMemo, useState, useRef, useCallback, useEffect } from "react";
+import React, { useMemo } from "react";
 import { useStore } from "@/components/store";
 import { Icon, ScoreRing, ScoreBar, ScoreBadge, EmptyState, PageWrap } from "@/components/ui";
 import { computeResult, scoreBucket, SCORE_HEX, tierLabel, SCORE_LABEL } from "@/lib/scoring";
+import { NotesPanel } from "@/components/notes-panel";
 import type { Solution } from "@/lib/schema";
 
 type NavFn = (name: string, params?: Record<string, string>) => void;
@@ -10,18 +11,6 @@ type ToastFn = (msg: string, icon?: string) => void;
 
 export default function ReporteDetailPage({ company, nav, toast }: { company: string; nav: NavFn; toast: ToastFn }) {
   const { tests, responses, modeConfig, mode } = useStore();
-  const [notes, setNotes] = useState("");
-  const [notesSaved, setNotesSaved] = useState(false);
-  const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Load consultant notes
-  useEffect(() => {
-    if (!company) return;
-    fetch(`/api/consultant-notes?company=${encodeURIComponent(company)}&mode=${mode}`)
-      .then((r) => r.json())
-      .then((d) => { if (d?.content) setNotes(d.content); })
-      .catch(() => {});
-  }, [company, mode]);
 
   const entityResponses = useMemo(
     () => responses.filter((r) => (r.company || "Sin asignar") === company),
@@ -90,23 +79,6 @@ export default function ReporteDetailPage({ company, nav, toast }: { company: st
     return sols;
   }, [tests, entityResponses]);
 
-  function handleNotesChange(val: string) {
-    setNotes(val);
-    setNotesSaved(false);
-    if (saveTimeout.current) clearTimeout(saveTimeout.current);
-    saveTimeout.current = setTimeout(async () => {
-      try {
-        await fetch("/api/consultant-notes", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ company, mode, content: val }),
-        });
-        setNotesSaved(true);
-        setTimeout(() => setNotesSaved(false), 2000);
-      } catch {}
-    }, 800);
-  }
-
   function copyLink() {
     const url = `${window.location.origin}${window.location.pathname}#reporte/${encodeURIComponent(company)}`;
     navigator.clipboard.writeText(url).then(() => toast("Enlace copiado", "link")).catch(() => toast("Error al copiar", "alert"));
@@ -139,8 +111,16 @@ export default function ReporteDetailPage({ company, nav, toast }: { company: st
           <button type="button" className="btn btn-ghost btn-sm" onClick={copyLink}>
             <Icon name="link" size={14} /> Copiar enlace
           </button>
+          <a
+            href={`/api/reports/${encodeURIComponent(company)}/pdf?mode=${mode}`}
+            className="btn btn-secondary btn-sm"
+            style={{ textDecoration: "none" }}
+            download
+          >
+            <Icon name="download" size={14} /> Descargar PDF
+          </a>
           <button type="button" className="btn btn-primary btn-sm" onClick={() => window.print()}>
-            <Icon name="doc" size={14} /> Imprimir / PDF
+            <Icon name="doc" size={14} /> Imprimir
           </button>
         </div>
 
@@ -271,26 +251,7 @@ export default function ReporteDetailPage({ company, nav, toast }: { company: st
               <h2 style={{ fontSize: 18, fontWeight: 800, marginBottom: 14, letterSpacing: "-.01em" }}>
                 Notas del consultor
               </h2>
-              <div className="card" style={{ padding: "18px 20px" }}>
-                <textarea
-                  className="input"
-                  value={notes}
-                  onChange={(e) => handleNotesChange(e.target.value)}
-                  placeholder="Escribe notas privadas del consultor para este cliente. Se guardan automáticamente."
-                  rows={6}
-                  style={{ width: "100%", resize: "vertical", fontSize: 13.5, lineHeight: 1.6, fontFamily: "inherit" }}
-                />
-                <div style={{ marginTop: 6, fontSize: 12, color: "var(--ink-3)", display: "flex", alignItems: "center", gap: 6 }}>
-                  {notesSaved ? (
-                    <>
-                      <Icon name="check2" size={13} style={{ color: "var(--good)" }} />
-                      <span style={{ color: "var(--good)" }}>Guardado</span>
-                    </>
-                  ) : (
-                    "Se guarda automáticamente al escribir"
-                  )}
-                </div>
-              </div>
+              <NotesPanel company={company} mode={mode} />
             </section>
 
             {/* Footer */}

@@ -166,10 +166,16 @@ function ResumenTab({ testId, responses }: { testId: string; responses: Response
 }
 
 // ---- Personas tab ----
+const PAGE_SIZE = 25;
+
 function PersonasTab({ testId, responses, nav }: { testId: string; responses: ResponseRow[]; nav: NavFn }) {
   const { tests, deleteResponse } = useStore();
   const test = tests.find((t) => t.id === testId);
   const [sortBy, setSortBy] = useState<"date" | "score">("date");
+  const [query, setQuery] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [page, setPage] = useState(0);
 
   const computed = useMemo(() => {
     if (!test) return [];
@@ -179,14 +185,38 @@ function PersonasTab({ testId, responses, nav }: { testId: string; responses: Re
     }));
   }, [test, responses]);
 
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return computed.filter((c) => {
+      if (q) {
+        const hay = `${c.row.respondent || ""} ${c.row.email || ""} ${c.row.company || ""} ${c.row.role || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      if (fromDate || toDate) {
+        const d = c.row.submittedAt ? c.row.submittedAt.slice(0, 10) : "";
+        if (fromDate && (!d || d < fromDate)) return false;
+        if (toDate && (!d || d > toDate)) return false;
+      }
+      return true;
+    });
+  }, [computed, query, fromDate, toDate]);
+
   const sorted = useMemo(() => {
-    return [...computed].sort((a, b) => {
+    return [...filtered].sort((a, b) => {
       if (sortBy === "score") return b.result.overall - a.result.overall;
       const da = a.row.submittedAt ? new Date(a.row.submittedAt).getTime() : 0;
       const db = b.row.submittedAt ? new Date(b.row.submittedAt).getTime() : 0;
       return db - da;
     });
-  }, [computed, sortBy]);
+  }, [filtered, sortBy]);
+
+  const pageCount = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE));
+  const safePage = Math.min(page, pageCount - 1);
+  const paged = sorted.slice(safePage * PAGE_SIZE, (safePage + 1) * PAGE_SIZE);
+
+  function updateFilter(setter: (v: string) => void) {
+    return (v: string) => { setter(v); setPage(0); };
+  }
 
   async function handleDelete(id: string) {
     if (!confirm("¿Eliminar esta respuesta? Esta acción no se puede deshacer.")) return;
@@ -198,11 +228,37 @@ function PersonasTab({ testId, responses, nav }: { testId: string; responses: Re
 
   return (
     <div>
-      {/* Sort controls */}
-      {sorted.length > 0 && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-          <span className="badge">{sorted.length} respuesta{sorted.length !== 1 ? "s" : ""}</span>
-          <div className="seg">
+      {/* Search + filter controls */}
+      {computed.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+          <div style={{ position: "relative", flex: "1 1 200px" }}>
+            <Icon name="search" size={14} style={{ position: "absolute", left: 10, top: "50%", transform: "translateY(-50%)", color: "var(--ink-3)", pointerEvents: "none" }} />
+            <input
+              className="input"
+              placeholder="Buscar por nombre, email o empresa…"
+              value={query}
+              onChange={(e) => updateFilter(setQuery)(e.target.value)}
+              style={{ paddingLeft: 32, fontSize: 13 }}
+            />
+          </div>
+          <input
+            className="input"
+            type="date"
+            value={fromDate}
+            onChange={(e) => updateFilter(setFromDate)(e.target.value)}
+            title="Desde"
+            style={{ fontSize: 13, flex: "0 1 140px" }}
+          />
+          <input
+            className="input"
+            type="date"
+            value={toDate}
+            onChange={(e) => updateFilter(setToDate)(e.target.value)}
+            title="Hasta"
+            style={{ fontSize: 13, flex: "0 1 140px" }}
+          />
+          <span className="badge">{sorted.length} de {computed.length}</span>
+          <div className="seg" style={{ flex: "none" }}>
             <button className={sortBy === "date" ? "on" : ""} onClick={() => setSortBy("date")}><Icon name="calendar" size={13} /> Fecha</button>
             <button className={sortBy === "score" ? "on" : ""} onClick={() => setSortBy("score")}><Icon name="gauge" size={13} /> Puntaje</button>
           </div>
@@ -210,7 +266,9 @@ function PersonasTab({ testId, responses, nav }: { testId: string; responses: Re
       )}
 
       {sorted.length === 0 ? (
-        <EmptyState icon="users" title="Sin respuestas" sub="Aún no hay respuestas para este cuestionario." />
+        computed.length === 0
+          ? <EmptyState icon="users" title="Sin respuestas" sub="Aún no hay respuestas para este cuestionario." />
+          : <EmptyState icon="search" title="Sin resultados" sub="Ninguna respuesta coincide con los filtros." />
       ) : (
         <div className="card" style={{ overflow: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
@@ -229,10 +287,10 @@ function PersonasTab({ testId, responses, nav }: { testId: string; responses: Re
               </tr>
             </thead>
             <tbody>
-              {sorted.map((c, i) => (
+              {paged.map((c, i) => (
                 <tr
                   key={c.row.id}
-                  style={{ borderBottom: i < sorted.length - 1 ? "1px solid var(--line)" : "none", cursor: "pointer", transition: "background .12s" }}
+                  style={{ borderBottom: i < paged.length - 1 ? "1px solid var(--line)" : "none", cursor: "pointer", transition: "background .12s" }}
                   onClick={() => window.open(`/q/${testId}/result/${c.row.id}`, "_blank")}
                   onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-sunken)")}
                   onMouseLeave={(e) => (e.currentTarget.style.background = "")}
@@ -276,6 +334,31 @@ function PersonasTab({ testId, responses, nav }: { testId: string; responses: Re
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* Pagination */}
+      {pageCount > 1 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 14, marginTop: 16 }}>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setPage((p) => Math.max(0, p - 1))}
+            disabled={safePage === 0}
+          >
+            <Icon name="chevronLeft" size={14} /> Anterior
+          </button>
+          <span style={{ fontSize: 13, color: "var(--ink-3)", fontWeight: 600 }}>
+            Página {safePage + 1} de {pageCount}
+          </span>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+            disabled={safePage >= pageCount - 1}
+          >
+            Siguiente <Icon name="chevronRight" size={14} />
+          </button>
         </div>
       )}
     </div>
@@ -435,14 +518,42 @@ function InvStatusBadge({ status }: { status: string }) {
 
 // ---- Invitaciones tab ----
 function InvitacionesTab({ testId, toast }: { testId: string; toast: ToastFn }) {
-  const { tests, addInvitation, deleteInvitation } = useStore();
+  const { tests, addInvitation, deleteInvitation, sendInvitation, sendPendingInvitations } = useStore();
   const test = tests.find((t) => t.id === testId);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [company, setCompany] = useState("");
   const [saving, setSaving] = useState(false);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [bulkSending, setBulkSending] = useState(false);
 
   const invitations: InvitationRow[] = test?.invitations || [];
+  const pendingCount = invitations.filter((i) => i.status === "pendiente" && i.email).length;
+
+  async function handleSend(inv: InvitationRow, reminder = false) {
+    setSendingId(inv.id);
+    try {
+      const result = await sendInvitation(inv.id, reminder);
+      if (result.ok) toast(reminder ? "Recordatorio enviado" : "Invitación enviada", "send");
+      else toast(result.error || "Error al enviar", "alert");
+    } finally {
+      setSendingId(null);
+    }
+  }
+
+  async function handleBulkSend() {
+    setBulkSending(true);
+    try {
+      const result = await sendPendingInvitations(testId);
+      if (result.ok) {
+        toast(`${result.sent} enviada${result.sent !== 1 ? "s" : ""}${result.failed ? `, ${result.failed} con error` : ""}`, "send");
+      } else {
+        toast(result.error || "Error al enviar", "alert");
+      }
+    } finally {
+      setBulkSending(false);
+    }
+  }
 
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault();
@@ -495,9 +606,16 @@ function InvitacionesTab({ testId, toast }: { testId: string; toast: ToastFn }) 
 
       {/* List */}
       <div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-          <h3 style={{ fontSize: 15, fontWeight: 700 }}>Invitaciones</h3>
-          <span className="badge">{invitations.length}</span>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 700 }}>Invitaciones</h3>
+            <span className="badge">{invitations.length}</span>
+          </div>
+          {pendingCount > 0 && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={handleBulkSend} disabled={bulkSending}>
+              <Icon name="send" size={13} /> {bulkSending ? "Enviando…" : `Enviar ${pendingCount} pendiente${pendingCount !== 1 ? "s" : ""}`}
+            </button>
+          )}
         </div>
         {invitations.length === 0 ? (
           <EmptyState icon="send" title="Sin invitaciones" sub="Agrega emails arriba para enviar invitaciones directas." />
@@ -514,6 +632,16 @@ function InvitacionesTab({ testId, toast }: { testId: string; toast: ToastFn }) 
                   </div>
                 </div>
                 <InvStatusBadge status={inv.status} />
+                {inv.email && inv.status === "pendiente" && (
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => handleSend(inv)} disabled={sendingId === inv.id} title="Enviar invitación por email">
+                    <Icon name="send" size={13} /> {sendingId === inv.id ? "Enviando…" : "Enviar"}
+                  </button>
+                )}
+                {inv.email && inv.status === "enviada" && (
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleSend(inv, true)} disabled={sendingId === inv.id} title="Enviar recordatorio">
+                    <Icon name="refresh" size={13} /> {sendingId === inv.id ? "Enviando…" : "Recordar"}
+                  </button>
+                )}
                 <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={() => handleDelete(inv.id)} style={{ padding: 5, width: 28, height: 28 }} title="Eliminar">
                   <Icon name="trash" size={14} />
                 </button>
