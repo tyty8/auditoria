@@ -27,9 +27,22 @@ function sanitizeDueDate(v: unknown): string | null {
   return typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null;
 }
 
+function sanitizeComments(v: unknown): { id: string; text: string; author?: string; at: string }[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .filter((c) => c && typeof c === "object" && typeof c.text === "string")
+    .slice(0, 200)
+    .map((c) => ({
+      id: typeof c.id === "string" ? c.id : uid("cm"),
+      text: String(c.text).slice(0, 2000),
+      author: typeof c.author === "string" ? c.author.slice(0, 120) : undefined,
+      at: typeof c.at === "string" ? c.at : new Date().toISOString(),
+    }));
+}
+
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { id, testId, solutionId, entityName, status, assignee, dueDate, priority } = body;
+  const { id, testId, solutionId, entityName, status, assignee, dueDate, priority, comments } = body;
 
   if (!testId || !solutionId || !entityName) {
     return NextResponse.json({ error: "testId, solutionId, and entityName are required" }, { status: 400 });
@@ -43,6 +56,8 @@ export async function POST(req: NextRequest) {
     assignee: assignee || null,
     dueDate: sanitizeDueDate(dueDate),
     priority: VALID_PRIORITIES.includes(priority) ? priority : "media",
+    // Only overwrite the comment thread when the client explicitly sends it.
+    ...(comments !== undefined ? { comments: sanitizeComments(comments) } : {}),
     updatedAt: new Date(),
   };
 

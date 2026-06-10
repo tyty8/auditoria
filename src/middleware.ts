@@ -10,6 +10,7 @@ import { verifySessionToken, COOKIE_NAME } from "@/lib/auth";
 function isPublic(req: NextRequest): boolean {
   const { pathname } = req.nextUrl;
   if (pathname.startsWith("/q/")) return true;
+  if (pathname.startsWith("/api/public/")) return true; // quiz drafts, opened-tracking, result email
   if (pathname === "/login") return true;
   if (pathname === "/api/auth/login" || pathname === "/api/auth/logout") return true;
   if (pathname.startsWith("/api/cron/")) return true;

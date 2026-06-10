@@ -29,11 +29,12 @@ export async function POST(req: NextRequest) {
     .where(and(eq(invitations.testId, testId), eq(invitations.status, "pendiente")));
 
   const branding = test.branding as Branding | null;
-  const link = `${appBaseUrl(req.nextUrl.origin)}/q/${test.id}`;
+  const baseLink = `${appBaseUrl(req.nextUrl.origin)}/q/${test.id}`;
 
   let sent = 0, failed = 0;
   for (const inv of pending) {
     if (!inv.email) { failed++; continue; }
+    const link = `${baseLink}?inv=${inv.id}`;
     const tpl = invitationEmail({
       recipientName: inv.name,
       testName: test.name,

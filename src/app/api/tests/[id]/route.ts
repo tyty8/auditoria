@@ -9,7 +9,7 @@ import type { Solution, Topic } from "@/lib/schema";
 // Only allow these columns to be patched — prevents mass assignment.
 const ALLOWED_PATCH_FIELDS = [
   "name", "domain", "tags", "description", "status",
-  "accent", "topics", "solutions", "branding", "mode",
+  "accent", "topics", "solutions", "branding", "mode", "archived",
 ] as const;
 type AllowedField = (typeof ALLOWED_PATCH_FIELDS)[number];
 type TestPatch = Partial<Pick<InferInsertModel<typeof tests>, AllowedField>>;

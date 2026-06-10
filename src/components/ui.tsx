@@ -45,6 +45,30 @@ const ICONS: Record<string, string> = {
   store: "M4 9.5L5.2 4.5a1 1 0 01.97-.75h11.66a1 1 0 01.97.75L20 9.5M4 9.5h16M4 9.5v1a3 3 0 006 0 3 3 0 006 0 3 3 0 004 0v-1M5.5 13.5V20a1 1 0 001 1h11a1 1 0 001-1v-6.5M9.5 21v-5h5v5",
   user: "M12 12a4 4 0 100-8 4 4 0 000 8zM4 21v-1a6 6 0 016-6h4a6 6 0 016 6v1",
   external: "M14 4h6v6M20 4l-9 9M18 13v6a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h6",
+  sun: "M12 17a5 5 0 100-10 5 5 0 000 10zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+  moon: "M21 12.8A9 9 0 1111.2 3a7 7 0 009.8 9.8z",
+  bell: "M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 01-3.4 0",
+  menu: "M4 6h16M4 12h16M4 18h16",
+  archive: "M3 4h18v4H3zM5 8v12a1 1 0 001 1h12a1 1 0 001-1V8M10 12h4",
+  star: "M12 3l2.7 5.8 6.3.7-4.7 4.3 1.3 6.2-5.6-3.2-5.6 3.2 1.3-6.2L3 9.5l6.3-.7L12 3z",
+  clock: "M12 21a9 9 0 100-18 9 9 0 000 18zM12 7v5l3 2",
+  mail: "M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1zM3.5 6.5l8.5 7 8.5-7",
+  filter: "M4 5h16M7 12h10M10 19h4",
+  columns: "M5 4h14a1 1 0 011 1v14a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1zM12 4v16",
+  kanban: "M5 4h4v16H5zM10.5 4h4v10h-4zM16 4h4v7h-4z",
+  comment: "M21 15a2 2 0 01-2 2H8l-5 4V5a2 2 0 012-2h14a2 2 0 012 2v10z",
+  trendUp: "M3 17l6-6 4 4 7-7M14 8h6v6",
+  trendDown: "M3 7l6 6 4-4 7 7M14 16h6v-6",
+  minus: "M5 12h14",
+  grid: "M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z",
+  history: "M3 3v5h5M3.05 13a9 9 0 102.13-7.36L3 8M12 7v5l4 2",
+  printer: "M6 9V3h12v6M6 18H4a1 1 0 01-1-1v-6a1 1 0 011-1h16a1 1 0 011 1v6a1 1 0 01-1 1h-2M6 14h12v7H6z",
+  keyboard: "M3 6h18a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V7a1 1 0 011-1zM6 10h.01M10 10h.01M14 10h.01M18 10h.01M6 14h.01M18 14h.01M9 14h6",
+  upload: "M12 15V3M8 7l4-4 4 4M5 21h14",
+  flag: "M5 21V4a1 1 0 011-1h12l-3 4 3 4H6",
+  play: "M7 4l13 8-13 8V4",
+  qr: "M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h3v3h-3zM20 14v.01M17 20h.01M20 17v.01M20 20h.01",
+  command: "M9 9V6a3 3 0 10-3 3h3zM9 15v3a3 3 0 11-3-3h3zM15 9h3a3 3 0 10-3-3v3zM15 15h3a3 3 0 11-3 3v-3zM9 9h6v6H9z",
 };
 
 export function Icon({ name, size = 18, stroke = 1.7, className = "", style = {} }: {
@@ -101,10 +125,14 @@ export function ScoreBar({ value, height = 8, showVal = false }: { value: number
 }
 
 // ---- Score Badge ----
+// Includes a shape icon per bucket (✓ / ! / ✕) so the state is readable
+// without relying on color alone (colorblind-safe).
+const BUCKET_ICON: Record<string, string> = { good: "check2", warn: "alert", bad: "x" };
 export function ScoreBadge({ value, withLabel = true }: { value: number; withLabel?: boolean }) {
   const b = scoreBucket(value);
   return (
     <span className={"badge badge-" + b}>
+      <Icon name={BUCKET_ICON[b]} size={11} stroke={2.6} />
       <span className="mono" style={{ fontWeight: 700 }}>{value}</span>
       {withLabel && <span>{SCORE_LABEL[b]}</span>}
     </span>
@@ -124,7 +152,7 @@ export function Modal({ open, onClose, children, width = 520, title, sub }: {
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div onMouseDown={onClose} style={{ position: "fixed", inset: 0, zIndex: 80, background: "rgba(24,33,28,.34)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, animation: "overlayIn .18s ease" }}>
+    <div onMouseDown={onClose} style={{ position: "fixed", inset: 0, zIndex: 80, background: "var(--overlay)", backdropFilter: "blur(2px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, animation: "overlayIn .18s ease" }}>
       <div onMouseDown={(e) => e.stopPropagation()} className="card" style={{ width, maxWidth: "100%", maxHeight: "88vh", overflow: "auto", boxShadow: "var(--sh-pop)", animation: "popIn .2s cubic-bezier(.2,.7,.3,1)", borderRadius: "var(--r-xl)" }}>
         {(title || sub) && <div style={{ padding: "22px 24px 0" }}>
           {title && <h3 style={{ fontSize: 20 }}>{title}</h3>}
@@ -201,4 +229,221 @@ export function PageWrap({ children, maxWidth = "var(--maxw)" }: { children: Rea
       {children}
     </div>
   );
+}
+
+// ---- Relative time ("hace 2 h") ----
+export function timeAgo(date: string | Date | null | undefined): string {
+  if (!date) return "";
+  const d = typeof date === "string" ? new Date(date) : date;
+  if (isNaN(d.getTime())) return "";
+  const s = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (s < 60) return "hace un momento";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `hace ${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `hace ${h} h`;
+  const days = Math.floor(h / 24);
+  if (days < 30) return days === 1 ? "hace 1 día" : `hace ${days} días`;
+  const mo = Math.floor(days / 30);
+  if (mo < 12) return mo === 1 ? "hace 1 mes" : `hace ${mo} meses`;
+  const y = Math.floor(mo / 12);
+  return y === 1 ? "hace 1 año" : `hace ${y} años`;
+}
+
+// ---- Sparkline ----
+export function Sparkline({ values, width = 84, height = 26, color = "var(--primary)", strokeWidth = 1.8, fill = true }: {
+  values: number[]; width?: number; height?: number; color?: string; strokeWidth?: number; fill?: boolean;
+}) {
+  if (!values || values.length < 2) {
+    return <svg width={width} height={height} aria-hidden="true"><line x1={2} y1={height / 2} x2={width - 2} y2={height / 2} stroke="var(--line-strong)" strokeWidth={1.5} strokeDasharray="3 3" /></svg>;
+  }
+  const min = Math.min(...values), max = Math.max(...values);
+  const range = max - min || 1;
+  const pad = 3;
+  const pts = values.map((v, i) => {
+    const x = pad + (i / (values.length - 1)) * (width - pad * 2);
+    const y = height - pad - ((v - min) / range) * (height - pad * 2);
+    return [Math.round(x * 10) / 10, Math.round(y * 10) / 10];
+  });
+  const line = pts.map((p) => p.join(",")).join(" ");
+  const area = `${pad},${height - pad} ${line} ${width - pad},${height - pad}`;
+  return (
+    <svg width={width} height={height} aria-hidden="true" style={{ display: "block" }}>
+      {fill && <polygon points={area} fill={color} opacity={0.12} />}
+      <polyline points={line} fill="none" stroke={color} strokeWidth={strokeWidth} strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx={pts[pts.length - 1][0]} cy={pts[pts.length - 1][1]} r={2.2} fill={color} />
+    </svg>
+  );
+}
+
+// ---- Delta badge (▲ +4 / ▼ -3 vs previous period) ----
+export function DeltaBadge({ delta, suffix = "", size = "md" }: { delta: number | null | undefined; suffix?: string; size?: "sm" | "md" }) {
+  const fs = size === "sm" ? 11 : 12.5;
+  if (delta == null || delta === 0) {
+    return (
+      <span className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: fs, fontWeight: 600, color: "var(--ink-3)" }} title="Sin cambio">
+        <Icon name="minus" size={fs - 1} stroke={2.4} /> {delta === 0 ? "0" + suffix : "—"}
+      </span>
+    );
+  }
+  const up = delta > 0;
+  const color = up ? "var(--good)" : "var(--bad)";
+  return (
+    <span className="mono" style={{ display: "inline-flex", alignItems: "center", gap: 3, fontSize: fs, fontWeight: 700, color }}>
+      <Icon name={up ? "trendUp" : "trendDown"} size={fs} stroke={2.2} />
+      {up ? "+" : ""}{delta}{suffix}
+    </span>
+  );
+}
+
+// ---- Skeleton loader ----
+export function Skeleton({ width = "100%", height = 14, radius = "var(--r-sm)", style = {} }: {
+  width?: number | string; height?: number | string; radius?: string | number; style?: React.CSSProperties;
+}) {
+  return <div className="skeleton" aria-hidden="true" style={{ width, height, borderRadius: radius, ...style }} />;
+}
+
+export function SkeletonCard({ lines = 3, height }: { lines?: number; height?: number }) {
+  return (
+    <div className="card" style={{ padding: 20, display: "flex", flexDirection: "column", gap: 12, height }}>
+      <Skeleton width="42%" height={16} />
+      {Array.from({ length: lines }, (_, i) => (
+        <Skeleton key={i} width={`${88 - i * 16}%`} height={12} />
+      ))}
+    </div>
+  );
+}
+
+// ---- Drawer (right slide-in panel) ----
+export function Drawer({ open, onClose, children, width = 480, title, sub }: {
+  open: boolean; onClose: () => void; children: React.ReactNode;
+  width?: number; title?: string; sub?: string;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div onMouseDown={onClose} className="no-print" style={{ position: "fixed", inset: 0, zIndex: 80, background: "var(--overlay)", backdropFilter: "blur(2px)", animation: "overlayIn .18s ease" }}>
+      <div onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-modal="true"
+        style={{ position: "absolute", top: 0, right: 0, bottom: 0, width, maxWidth: "94vw", background: "var(--surface)", borderLeft: "1px solid var(--line)", boxShadow: "var(--sh-pop)", display: "flex", flexDirection: "column", animation: "drawerIn .24s cubic-bezier(.2,.7,.3,1)" }}>
+        <div style={{ padding: "18px 22px 14px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "flex-start", gap: 12 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            {title && <h3 style={{ fontSize: 18 }}>{title}</h3>}
+            {sub && <p style={{ color: "var(--ink-2)", marginTop: 4, fontSize: 13.5 }}>{sub}</p>}
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose} aria-label="Cerrar">
+            <Icon name="x" size={17} />
+          </button>
+        </div>
+        <div style={{ flex: 1, overflow: "auto", padding: 22 }}>{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// ---- Context menu button (⋯) ----
+export type MenuItem = { label: string; icon?: string; danger?: boolean; onClick: () => void } | "divider";
+export function MenuButton({ items, icon = "dots", size = 34, align = "right", label }: {
+  items: MenuItem[]; icon?: string; size?: number; align?: "left" | "right"; label?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ position: "relative" }} onClick={(e) => e.stopPropagation()}>
+      <button className="btn btn-ghost btn-icon" aria-label={label || "Más acciones"} title={label || "Más acciones"}
+        style={{ width: size, height: size }} onClick={() => setOpen(!open)}>
+        <Icon name={icon} size={17} />
+      </button>
+      {open && (
+        <>
+          <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 50 }} />
+          <div className="card" style={{ position: "absolute", [align]: 0, top: size + 6, minWidth: 190, padding: 6, boxShadow: "var(--sh-pop)", zIndex: 51, animation: "popIn .15s cubic-bezier(.2,.7,.3,1)" }}>
+            {items.map((it, i) =>
+              it === "divider" ? (
+                <div key={i} className="hr" style={{ margin: "5px 0" }} />
+              ) : (
+                <button key={i} className="btn btn-ghost btn-block btn-sm"
+                  style={{ justifyContent: "flex-start", gap: 9, padding: "8px 10px", color: it.danger ? "var(--bad)" : undefined }}
+                  onClick={() => { setOpen(false); it.onClick(); }}>
+                  {it.icon && <Icon name={it.icon} size={15} />}
+                  {it.label}
+                </button>
+              )
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- Confirm modal (named destructive confirmation) ----
+export function ConfirmModal({ open, onClose, onConfirm, title, message, confirmLabel = "Eliminar", danger = true }: {
+  open: boolean; onClose: () => void; onConfirm: () => void;
+  title: string; message?: React.ReactNode; confirmLabel?: string; danger?: boolean;
+}) {
+  return (
+    <Modal open={open} onClose={onClose} width={420} title={title}>
+      <div style={{ padding: "14px 24px 22px" }}>
+        {message && <p style={{ color: "var(--ink-2)", fontSize: 14, lineHeight: 1.55 }}>{message}</p>}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 9, marginTop: 20 }}>
+          <button className="btn btn-secondary" onClick={onClose}>Cancelar</button>
+          <button className="btn btn-primary" style={danger ? { background: "var(--bad)" } : undefined}
+            onClick={() => { onConfirm(); onClose(); }}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---- Breadcrumbs ----
+export function Breadcrumbs({ items }: { items: { label: string; onClick?: () => void }[] }) {
+  return (
+    <nav aria-label="breadcrumb" style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", fontSize: 13, color: "var(--ink-3)", fontWeight: 600 }}>
+      {items.map((it, i) => {
+        const last = i === items.length - 1;
+        return (
+          <React.Fragment key={i}>
+            {i > 0 && <Icon name="chevronRight" size={13} style={{ color: "var(--ink-4)" }} />}
+            {it.onClick && !last ? (
+              <button onClick={it.onClick} style={{ background: "none", border: "none", padding: 0, font: "inherit", color: "var(--ink-3)", cursor: "pointer" }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = "var(--ink)")}
+                onMouseLeave={(e) => (e.currentTarget.style.color = "var(--ink-3)")}>
+                {it.label}
+              </button>
+            ) : (
+              <span style={{ color: last ? "var(--ink)" : undefined }}>{it.label}</span>
+            )}
+          </React.Fragment>
+        );
+      })}
+    </nav>
+  );
+}
+
+// ---- Theme (dark mode) ----
+export function useTheme(): ["light" | "dark", () => void] {
+  const [theme, setTheme] = useState<"light" | "dark">("light");
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("auditoria_theme");
+      if (stored === "dark") setTheme("dark");
+    } catch {}
+  }, []);
+  useEffect(() => {
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  }, [theme]);
+  const toggle = useCallback(() => {
+    setTheme((prev) => {
+      const next = prev === "dark" ? "light" : "dark";
+      try { localStorage.setItem("auditoria_theme", next); } catch {}
+      return next;
+    });
+  }, []);
+  return [theme, toggle];
 }

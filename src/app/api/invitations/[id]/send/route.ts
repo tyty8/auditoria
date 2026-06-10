@@ -27,7 +27,8 @@ export async function POST(
   }
 
   const branding = test.branding as Branding | null;
-  const link = `${appBaseUrl(req.nextUrl.origin)}/q/${test.id}`;
+  // ?inv= lets the quiz mark the invitation as opened and key the server-side draft.
+  const link = `${appBaseUrl(req.nextUrl.origin)}/q/${test.id}?inv=${inv.id}`;
   const tpl = (isReminder ? reminderEmail : invitationEmail)({
     recipientName: inv.name,
     testName: test.name,

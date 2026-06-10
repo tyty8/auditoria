@@ -1,16 +1,8 @@
 "use client";
 import React, { useState, useMemo, useEffect, useRef } from "react";
-import type { Test } from "@/lib/schema";
-import {
-  computeResult,
-  shuffleArray,
-  isQuestionActive,
-  SCORE_HEX,
-  SCORE_LABEL,
-  scoreBucket,
-  tierLabel,
-} from "@/lib/scoring";
-import { Icon, ScoreRing, ScoreBar, ScoreBadge } from "@/components/ui";
+import type { Test, Topic, Solution, Option, Question } from "@/lib/schema";
+import { computeResult, shuffleArray, isQuestionActive } from "@/lib/scoring";
+import { Icon } from "@/components/ui";
 import ResultView from "@/components/result-view";
 
 type Stage = "intro" | "quiz" | "submitting" | "result" | "error";
@@ -43,17 +35,18 @@ function clearDraft(testId: string) {
   try { localStorage.removeItem(draftKey(testId)); } catch {}
 }
 
+const SINGLE_MODE_KEY = "auditoria_quiz_singlemode";
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-export default function ClientQuiz({ test }: { test: Test }) {
+export default function ClientQuiz({ test, inv }: { test: Test; inv?: string }) {
   const branding = test.branding;
   const accent = branding?.accent || test.accent || "var(--primary)";
   const coverColor = branding?.coverColor || accent;
   const orgName = branding?.orgName || test.name;
-  const thankYou = branding?.thankYou || "¡Gracias por completar la evaluación!";
 
-  const topics = (test.topics as import("@/lib/schema").Topic[]) || [];
-  const solutions = (test.solutions as import("@/lib/schema").Solution[]) || [];
+  const topics = (test.topics as Topic[]) || [];
+  const solutions = (test.solutions as Solution[]) || [];
 
   const [stage, setStage] = useState<Stage>("intro");
   const [respondent, setRespondent] = useState("");
@@ -64,15 +57,85 @@ export default function ClientQuiz({ test }: { test: Test }) {
   const [topicIndex, setTopicIndex] = useState(0);
   const [responseId, setResponseId] = useState<string | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
-  const hydrated = useRef(false);
+  // One-question-at-a-time mode + index of the current question within the topic
+  const [singleMode, setSingleMode] = useState(false);
+  const [qIndex, setQIndex] = useState(0);
+  // Micro-celebration banner shown when a topic is completed
+  const [celebration, setCelebration] = useState<{ num: number; total: number } | null>(null);
+  // Question card currently pulse-highlighted (blocked "Siguiente")
+  const [pulseId, setPulseId] = useState<string | null>(null);
+  // Tick that triggers the delayed auto-advance in single-question mode
+  const [advanceReq, setAdvanceReq] = useState(0);
 
-  // Look for a saved draft after mount (localStorage is browser-only).
+  const hydrated = useRef(false);
+  const questionRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const checkedServerKeys = useRef<Set<string>>(new Set());
+  const advanceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pulseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const celebrationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Server-draft key: invitation id wins; otherwise the normalized email.
+  const serverKey = useMemo(() => {
+    if (inv && inv.trim().length >= 3) return inv.trim().toLowerCase();
+    const e = email.trim().toLowerCase();
+    return e.length >= 3 && e.includes("@") ? e : null;
+  }, [inv, email]);
+
+  // Look for a saved local draft + single-mode preference after mount.
   useEffect(() => {
     setDraft(loadDraft(test.id));
     hydrated.current = true;
+    try {
+      const saved = localStorage.getItem(SINGLE_MODE_KEY);
+      if (saved != null) setSingleMode(saved === "1");
+      else setSingleMode(window.innerWidth < 640);
+    } catch {}
   }, [test.id]);
 
-  // Persist progress while answering so a crash or accidental close loses nothing.
+  // Invitation tracking: stamp openedAt (fire-and-forget, idempotent server-side).
+  useEffect(() => {
+    if (!inv) return;
+    fetch("/api/public/invitation-opened", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ id: inv }),
+    }).catch(() => {});
+  }, [inv]);
+
+  // Server-side draft lookup on the intro: lets a respondent resume from
+  // another device. Prefers whichever copy (local vs server) is more recent.
+  useEffect(() => {
+    if (stage !== "intro" || !serverKey) return;
+    if (checkedServerKeys.current.has(serverKey)) return;
+    const t = setTimeout(async () => {
+      checkedServerKeys.current.add(serverKey);
+      try {
+        const res = await fetch(
+          `/api/public/quiz-draft?testId=${encodeURIComponent(test.id)}&key=${encodeURIComponent(serverKey)}`
+        );
+        if (!res.ok) return;
+        const row = await res.json();
+        if (!row || !row.answers || Object.keys(row.answers).length === 0) return;
+        const savedAt = row.updatedAt ? Date.parse(row.updatedAt) || 0 : 0;
+        const person = (row.person || {}) as { name?: string; email?: string; company?: string; role?: string };
+        const remote: Draft = {
+          respondent: person.name || "",
+          email: person.email || "",
+          company: person.company || "",
+          role: person.role || "",
+          answers: row.answers as Record<string, string>,
+          topicIndex: topicIndexForAnswers(row.answers as Record<string, string>),
+          savedAt,
+        };
+        // Keep the more recent of local vs server.
+        setDraft((local) => (local && local.savedAt >= savedAt ? local : remote));
+      } catch {}
+    }, inv ? 0 : 800); // debounce while the email field is being typed
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage, serverKey, test.id, inv]);
+
+  // Persist progress locally while answering so a crash or close loses nothing.
   useEffect(() => {
     if (!hydrated.current) return;
     if (stage !== "quiz" && stage !== "intro") return;
@@ -80,14 +143,67 @@ export default function ClientQuiz({ test }: { test: Test }) {
     saveDraft(test.id, { respondent, email, company, role, answers, topicIndex });
   }, [test.id, stage, respondent, email, company, role, answers, topicIndex]);
 
+  // Debounced server-side backup of the in-progress quiz (~1.5s after changes).
+  useEffect(() => {
+    if (stage !== "quiz" || !serverKey) return;
+    if (Object.keys(answers).length === 0) return;
+    const t = setTimeout(() => {
+      fetch("/api/public/quiz-draft", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          testId: test.id,
+          key: serverKey,
+          person: { name: respondent, email, company, role },
+          answers,
+        }),
+      }).catch(() => {});
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [stage, serverKey, answers, respondent, email, company, role, test.id]);
+
+  // Clear pending timers on unmount.
+  useEffect(() => () => {
+    if (advanceTimer.current) clearTimeout(advanceTimer.current);
+    if (pulseTimer.current) clearTimeout(pulseTimer.current);
+    if (celebrationTimer.current) clearTimeout(celebrationTimer.current);
+  }, []);
+
+  function topicIndexForAnswers(ans: Record<string, string>): number {
+    for (let i = 0; i < topics.length; i++) {
+      const qs = topics[i].questions.filter((q) => isQuestionActive(q, ans));
+      if (qs.some((q) => ans[q.id] == null)) return i;
+    }
+    return Math.max(0, topics.length - 1);
+  }
+
+  function setSingleModePersist(v: boolean) {
+    setSingleMode(v);
+    try { localStorage.setItem(SINGLE_MODE_KEY, v ? "1" : "0"); } catch {}
+  }
+
+  function deleteServerDraft() {
+    if (!serverKey) return;
+    fetch("/api/public/quiz-draft", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ testId: test.id, key: serverKey }),
+    }).catch(() => {});
+  }
+
   function resumeDraft() {
     if (!draft) return;
+    const ti = Math.min(draft.topicIndex || 0, Math.max(0, topics.length - 1));
     setRespondent(draft.respondent || "");
     setEmail(draft.email || "");
     setCompany(draft.company || "");
     setRole(draft.role || "");
     setAnswers(draft.answers || {});
-    setTopicIndex(Math.min(draft.topicIndex || 0, Math.max(0, topics.length - 1)));
+    setTopicIndex(ti);
+    // Single mode: land on the first unanswered question of that topic.
+    const acts = topics[ti] ? topics[ti].questions.filter((q) => isQuestionActive(q, draft.answers || {})) : [];
+    const qi = acts.findIndex((q) => (draft.answers || {})[q.id] == null);
+    setQIndex(qi >= 0 ? qi : 0);
     setStage(draft.respondent ? "quiz" : "intro");
     setDraft(null);
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -95,12 +211,13 @@ export default function ClientQuiz({ test }: { test: Test }) {
 
   function discardDraft() {
     clearDraft(test.id);
+    deleteServerDraft();
     setDraft(null);
   }
 
   // Shuffle options once per question when quiz starts — stable for session
   const shuffledOptions = useMemo(() => {
-    const map: Record<string, import("@/lib/schema").Option[]> = {};
+    const map: Record<string, Option[]> = {};
     topics.forEach((topic) => {
       topic.questions.forEach((q) => {
         map[q.id] = shuffleArray(q.options);
@@ -113,20 +230,124 @@ export default function ClientQuiz({ test }: { test: Test }) {
   const activeQuestions = currentTopic
     ? currentTopic.questions.filter((q) => isQuestionActive(q, answers))
     : [];
+  const allActive = topics.flatMap((t) => t.questions.filter((q) => isQuestionActive(q, answers)));
+  const answeredCount = allActive.filter((q) => answers[q.id] != null).length;
+  const allActiveAnswered = activeQuestions.every((q) => answers[q.id] != null);
 
   const isLastTopic = topicIndex === topics.length - 1;
+  const safeQIndex = Math.min(qIndex, Math.max(0, activeQuestions.length - 1));
+  const currentQuestion: Question | undefined = activeQuestions[safeQIndex];
+  const isFinalQuestion = isLastTopic && safeQIndex >= activeQuestions.length - 1;
 
-  function handleAnswer(questionId: string, optionId: string) {
-    setAnswers((prev) => ({ ...prev, [questionId]: optionId }));
+  // Keep qIndex in range when conditional questions appear/disappear.
+  useEffect(() => {
+    const max = Math.max(0, activeQuestions.length - 1);
+    if (qIndex > max) setQIndex(max);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topicIndex, activeQuestions.length]);
+
+  function showCelebration(num: number) {
+    setCelebration({ num, total: topics.length });
+    if (celebrationTimer.current) clearTimeout(celebrationTimer.current);
+    celebrationTimer.current = setTimeout(() => setCelebration(null), 1200);
   }
 
-  function handleNext() {
-    if (isLastTopic) {
-      handleSubmit();
-    } else {
-      setTopicIndex((i) => i + 1);
+  function pulseQuestion(id: string, scroll = true) {
+    if (scroll) questionRefs.current[id]?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setPulseId(null);
+    requestAnimationFrame(() => setPulseId(id));
+    if (pulseTimer.current) clearTimeout(pulseTimer.current);
+    pulseTimer.current = setTimeout(() => setPulseId(null), 2300);
+  }
+
+  function selectOption(questionId: string, optionId: string) {
+    setAnswers((prev) => ({ ...prev, [questionId]: optionId }));
+    if (singleMode) {
+      // Auto-advance shortly after selecting (subtle, cancellable).
+      if (advanceTimer.current) clearTimeout(advanceTimer.current);
+      advanceTimer.current = setTimeout(() => setAdvanceReq((n) => n + 1), 350);
+    }
+  }
+
+  // Runs after the answer above lands in state, so conditional questions are fresh.
+  useEffect(() => {
+    if (advanceReq === 0 || stage !== "quiz" || !singleMode) return;
+    goNextSingle(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [advanceReq]);
+
+  function goNextSingle(auto = false) {
+    const acts = currentTopic ? currentTopic.questions.filter((q) => isQuestionActive(q, answers)) : [];
+    const idx = Math.min(qIndex, Math.max(0, acts.length - 1));
+    if (idx < acts.length - 1) {
+      setQIndex(idx + 1);
+    } else if (!isLastTopic) {
+      showCelebration(topicIndex + 1);
+      setTopicIndex(topicIndex + 1);
+      setQIndex(0);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } else if (auto) {
+      // Last question of the last topic: never auto-submit — wait for "Enviar".
+    }
+  }
+
+  function goBackSingle() {
+    if (safeQIndex > 0) {
+      setQIndex(safeQIndex - 1);
+      return;
+    }
+    if (topicIndex > 0) {
+      const prevActs = topics[topicIndex - 1].questions.filter((q) => isQuestionActive(q, answers));
+      setTopicIndex(topicIndex - 1);
+      setQIndex(Math.max(0, prevActs.length - 1));
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
+  }
+
+  function gotoQuestion(qid: string) {
+    const ti = topics.findIndex((t) => t.questions.some((q) => q.id === qid));
+    if (ti < 0) return;
+    const acts = topics[ti].questions.filter((q) => isQuestionActive(q, answers));
+    const qi = acts.findIndex((q) => q.id === qid);
+    setTopicIndex(ti);
+    setQIndex(Math.max(0, qi));
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    window.setTimeout(() => pulseQuestion(qid, false), 350);
+  }
+
+  function handleNextSingle() {
+    if (!currentQuestion) return;
+    if (answers[currentQuestion.id] == null) {
+      pulseQuestion(currentQuestion.id, false);
+      return;
+    }
+    if (!isFinalQuestion) {
+      if (advanceTimer.current) clearTimeout(advanceTimer.current);
+      goNextSingle();
+      return;
+    }
+    // Final question: validate everything before submitting.
+    const firstUn = allActive.find((q) => answers[q.id] == null);
+    if (firstUn) {
+      gotoQuestion(firstUn.id);
+      return;
+    }
+    handleSubmit();
+  }
+
+  function handleNextClassic() {
+    if (!allActiveAnswered) {
+      const firstUn = activeQuestions.find((q) => answers[q.id] == null);
+      if (firstUn) pulseQuestion(firstUn.id);
+      return;
+    }
+    if (isLastTopic) {
+      handleSubmit();
+      return;
+    }
+    showCelebration(topicIndex + 1);
+    setTopicIndex((i) => i + 1);
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
   function handleBack() {
@@ -135,6 +356,42 @@ export default function ClientQuiz({ test }: { test: Test }) {
       window.scrollTo({ top: 0, behavior: "smooth" });
     }
   }
+
+  // Keyboard shortcuts: 1-9 select an option, Enter advances (quiz stage only).
+  useEffect(() => {
+    if (stage !== "quiz") return;
+    function onKey(e: KeyboardEvent) {
+      if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t) {
+        const tag = t.tagName;
+        if (tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable) return;
+        if (tag === "INPUT") {
+          const type = (t as HTMLInputElement).type;
+          if (type !== "radio" && type !== "checkbox") return; // typing in a text field
+        }
+      }
+      if (e.key >= "1" && e.key <= "9") {
+        const target = singleMode
+          ? currentQuestion
+          : activeQuestions.find((q) => answers[q.id] == null) ?? activeQuestions[activeQuestions.length - 1];
+        if (!target) return;
+        const opts = shuffledOptions[target.id] || target.options;
+        const opt = opts[Number(e.key) - 1];
+        if (opt) {
+          e.preventDefault();
+          selectOption(target.id, opt.id);
+          if (!singleMode) pulseQuestion(target.id, false);
+        }
+      } else if (e.key === "Enter") {
+        e.preventDefault();
+        if (singleMode) handleNextSingle();
+        else handleNextClassic();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  });
 
   async function handleSubmit() {
     setStage("submitting");
@@ -167,6 +424,7 @@ export default function ClientQuiz({ test }: { test: Test }) {
         }
         const data = await res.json();
         clearDraft(test.id);
+        deleteServerDraft();
         setResponseId(data.id);
         setStage("result");
         window.scrollTo({ top: 0, behavior: "smooth" });
@@ -182,6 +440,7 @@ export default function ClientQuiz({ test }: { test: Test }) {
     clearDraft(test.id);
     setAnswers({});
     setTopicIndex(0);
+    setQIndex(0);
     setRespondent("");
     setEmail("");
     setCompany("");
@@ -196,8 +455,158 @@ export default function ClientQuiz({ test }: { test: Test }) {
     "--brand": accent,
   } as React.CSSProperties;
 
+  // ---- Shared question card (classic + single modes) ----
+  function renderQuestionCard(q: Question, displayNumber: number, animate = false) {
+    const opts = shuffledOptions[q.id] || q.options;
+    const selected = answers[q.id];
+    return (
+      <div
+        key={q.id}
+        ref={(el) => { questionRefs.current[q.id] = el; }}
+        className={"card" + (pulseId === q.id ? " pulse-highlight" : "")}
+        style={{
+          padding: "22px 24px",
+          ...(animate ? { animation: "fadeUp .3s cubic-bezier(.2,.7,.3,1) both" } : null),
+        }}
+      >
+        <fieldset style={{ border: "none", margin: 0, padding: 0, minWidth: 0 }}>
+          <legend style={{ padding: 0, width: "100%", marginBottom: 18 }}>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+              <div
+                aria-hidden="true"
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: "50%",
+                  background: selected ? "var(--brand)" : "var(--surface-sunken)",
+                  color: selected ? "#fff" : "var(--ink-3)",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  flex: "none",
+                  transition: "background .2s, color .2s",
+                  fontFamily: "var(--font-mono)",
+                }}
+              >
+                {displayNumber}
+              </div>
+              <p
+                style={{
+                  fontSize: 15.5,
+                  fontWeight: 600,
+                  color: "var(--ink)",
+                  lineHeight: 1.45,
+                  marginTop: 3,
+                  marginBottom: 0,
+                }}
+              >
+                {q.text}
+              </p>
+            </div>
+          </legend>
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 40 }}>
+            {opts.map((opt, oi) => {
+              const isSelected = selected === opt.id;
+              return (
+                <label
+                  key={opt.id}
+                  className="quiz-opt"
+                  style={{
+                    position: "relative",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 12,
+                    width: "100%",
+                    minHeight: 48,
+                    padding: "12px 14px",
+                    borderRadius: "var(--r-sm)",
+                    border: `1.5px solid ${isSelected ? "var(--brand)" : "var(--line-2)"}`,
+                    background: isSelected ? "color-mix(in srgb, var(--brand) 8%, transparent)" : "var(--surface)",
+                    cursor: "pointer",
+                    userSelect: "none",
+                  }}
+                >
+                  {/* Real radio: visually hidden but focusable/announced */}
+                  <input
+                    type="radio"
+                    name={q.id}
+                    value={opt.id}
+                    checked={isSelected}
+                    onChange={() => selectOption(q.id, opt.id)}
+                    style={{
+                      position: "absolute",
+                      opacity: 0,
+                      width: 1,
+                      height: 1,
+                      margin: 0,
+                      pointerEvents: "none",
+                    }}
+                  />
+                  {/* Custom radio indicator */}
+                  <div
+                    aria-hidden="true"
+                    style={{
+                      width: 18,
+                      height: 18,
+                      borderRadius: "50%",
+                      border: `2px solid ${isSelected ? "var(--brand)" : "var(--line-strong)"}`,
+                      background: isSelected ? "var(--brand)" : "transparent",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      flex: "none",
+                      transition: "border-color .15s, background .15s",
+                    }}
+                  >
+                    {isSelected && (
+                      <div style={{ width: 7, height: 7, borderRadius: "50%", background: "#fff" }} />
+                    )}
+                  </div>
+                  <span
+                    style={{
+                      fontSize: 14.5,
+                      fontWeight: isSelected ? 600 : 500,
+                      color: isSelected ? "var(--ink)" : "var(--ink-2)",
+                      lineHeight: 1.4,
+                      flex: 1,
+                    }}
+                  >
+                    {opt.label}
+                  </span>
+                  {oi < 9 && (
+                    <kbd
+                      className="quiz-kbd"
+                      aria-hidden="true"
+                      style={{
+                        fontSize: 10.5,
+                        fontFamily: "var(--font-mono)",
+                        color: "var(--ink-4)",
+                        border: "1px solid var(--line-2)",
+                        borderRadius: 4,
+                        padding: "1px 5px",
+                        flex: "none",
+                        background: "var(--surface)",
+                      }}
+                    >
+                      {oi + 1}
+                    </kbd>
+                  )}
+                </label>
+              );
+            })}
+          </div>
+        </fieldset>
+      </div>
+    );
+  }
+
   // ---- Intro screen ----
   if (stage === "intro") {
+    const totalQ = topics.reduce((s, t) => s + t.questions.length, 0);
+    const estMin = Math.max(2, Math.round((totalQ * 25) / 60));
     return (
       <div style={{ ...rootStyle, minHeight: "100vh", display: "flex", flexDirection: "column" }}>
         {/* Cover hero */}
@@ -212,6 +621,24 @@ export default function ClientQuiz({ test }: { test: Test }) {
             gap: 12,
           }}
         >
+          {branding?.logoUrl && (
+            <div
+              style={{
+                background: "#fff",
+                borderRadius: 10,
+                padding: "8px 14px",
+                display: "inline-flex",
+                marginBottom: 2,
+              }}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={branding.logoUrl}
+                alt={orgName}
+                style={{ maxHeight: 36, maxWidth: 180, objectFit: "contain", display: "block" }}
+              />
+            </div>
+          )}
           <div
             style={{
               fontSize: 13,
@@ -257,6 +684,8 @@ export default function ClientQuiz({ test }: { test: Test }) {
               color: "rgba(255,255,255,.6)",
               fontSize: 13,
               fontWeight: 600,
+              flexWrap: "wrap",
+              justifyContent: "center",
             }}
           >
             <span>
@@ -265,7 +694,11 @@ export default function ClientQuiz({ test }: { test: Test }) {
             </span>
             <span>
               <Icon name="list" size={14} style={{ verticalAlign: "middle", marginRight: 5 }} />
-              {topics.reduce((s, t) => s + t.questions.length, 0)} preguntas
+              {totalQ} preguntas
+            </span>
+            <span>
+              <Icon name="clock" size={14} style={{ verticalAlign: "middle", marginRight: 5 }} />
+              ~{estMin} minutos
             </span>
           </div>
         </div>
@@ -287,14 +720,14 @@ export default function ClientQuiz({ test }: { test: Test }) {
                 <p style={{ fontSize: 13, color: "var(--ink-3)", margin: 0, lineHeight: 1.5 }}>
                   Guardamos {Object.keys(draft.answers).length} respuesta{Object.keys(draft.answers).length !== 1 ? "s" : ""} de una sesión anterior. Puedes continuar donde lo dejaste.
                 </p>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button
                     type="button"
                     className="btn btn-sm"
                     onClick={resumeDraft}
                     style={{ background: "var(--brand)", color: "#fff", border: "none", fontWeight: 700 }}
                   >
-                    Continuar donde lo dejé
+                    Continuar donde quedaste ({Object.keys(draft.answers).length} respuesta{Object.keys(draft.answers).length !== 1 ? "s" : ""} guardada{Object.keys(draft.answers).length !== 1 ? "s" : ""})
                   </button>
                   <button type="button" className="btn btn-ghost btn-sm" onClick={discardDraft}>
                     Empezar de nuevo
@@ -365,6 +798,28 @@ export default function ClientQuiz({ test }: { test: Test }) {
                   />
                 </div>
               </div>
+
+              <label
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  cursor: "pointer",
+                  fontSize: 13.5,
+                  fontWeight: 600,
+                  color: "var(--ink-2)",
+                  userSelect: "none",
+                  marginTop: 2,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={singleMode}
+                  onChange={(e) => setSingleModePersist(e.target.checked)}
+                  style={{ width: 16, height: 16, accentColor: accent }}
+                />
+                Ver una pregunta a la vez
+              </label>
 
               <button
                 type="submit"
@@ -473,6 +928,9 @@ export default function ClientQuiz({ test }: { test: Test }) {
           respondent={respondent}
           company={company}
           onRestart={handleRestart}
+          answers={answers}
+          responseId={responseId}
+          responseEmail={email.trim() || null}
         />
       </div>
     );
@@ -480,12 +938,52 @@ export default function ClientQuiz({ test }: { test: Test }) {
 
   // ---- Quiz screen ----
   const progressPct = topics.length > 0 ? ((topicIndex + 1) / topics.length) * 100 : 0;
-  const allActiveAnswered = activeQuestions.every((q) => answers[q.id] != null);
-  const allActive = topics.flatMap((t) => t.questions.filter((q) => isQuestionActive(q, answers)));
-  const answeredCount = allActive.filter((q) => answers[q.id] != null).length;
+  const globalIdx = currentQuestion ? allActive.findIndex((q) => q.id === currentQuestion.id) + 1 : 0;
+  const currentAnswered = currentQuestion ? answers[currentQuestion.id] != null : false;
+  const pendingInTopic = activeQuestions.filter((q) => answers[q.id] == null).length;
 
   return (
     <div style={{ ...rootStyle, minHeight: "100vh", background: "var(--bg)" }}>
+      <style>{`
+        .quiz-opt { transition: border-color .15s, background .15s, transform .12s ease; }
+        .quiz-opt:active { transform: scale(.99); }
+        .quiz-opt:has(input:focus-visible) { outline: 2px solid var(--brand); outline-offset: 2px; }
+        .quiz-kbd { display: none; }
+        @media (min-width: 640px) { .quiz-kbd { display: inline-block; } }
+      `}</style>
+
+      {/* Topic-completed micro-celebration */}
+      {celebration && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: "fixed",
+            top: 86,
+            left: 0,
+            right: 0,
+            display: "flex",
+            justifyContent: "center",
+            zIndex: 60,
+            pointerEvents: "none",
+          }}
+        >
+          <div
+            style={{
+              background: "var(--brand)",
+              color: "#fff",
+              borderRadius: 99,
+              padding: "10px 22px",
+              fontSize: 14,
+              fontWeight: 700,
+              boxShadow: "0 8px 24px rgba(0,0,0,.22)",
+              animation: "fadeUp .3s cubic-bezier(.2,.7,.3,1) both",
+            }}
+          >
+            ✦ Sección {celebration.num} de {celebration.total} completada
+          </div>
+        </div>
+      )}
+
       {/* Progress bar header */}
       <div
         style={{
@@ -503,7 +1001,7 @@ export default function ClientQuiz({ test }: { test: Test }) {
               display: "flex",
               alignItems: "center",
               justifyContent: "space-between",
-              padding: "12px 0 8px",
+              padding: "12px 0 6px",
               gap: 16,
             }}
           >
@@ -520,6 +1018,51 @@ export default function ClientQuiz({ test }: { test: Test }) {
             >
               {answeredCount} de {allActive.length} preguntas · {Math.round(progressPct)}%
             </div>
+          </div>
+          {/* Topic stepper: done = filled, current = pill with name, pending = hollow */}
+          <div
+            aria-hidden="true"
+            style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, overflow: "hidden" }}
+          >
+            {topics.map((t, i) =>
+              i === topicIndex ? (
+                <div
+                  key={t.id}
+                  title={t.name}
+                  style={{
+                    padding: "2px 10px",
+                    borderRadius: 99,
+                    background: "color-mix(in srgb, var(--brand) 12%, transparent)",
+                    color: "var(--brand)",
+                    fontSize: 11,
+                    fontWeight: 700,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    maxWidth: 170,
+                    lineHeight: "16px",
+                    flex: "none",
+                  }}
+                >
+                  {t.name}
+                </div>
+              ) : (
+                <div
+                  key={t.id}
+                  title={t.name}
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    flex: "none",
+                    boxSizing: "border-box",
+                    background: i < topicIndex ? "var(--brand)" : "transparent",
+                    border: i < topicIndex ? "none" : "1.5px solid var(--line-strong)",
+                    transition: "background .2s",
+                  }}
+                />
+              )
+            )}
           </div>
           {/* Progress track */}
           <div
@@ -546,7 +1089,7 @@ export default function ClientQuiz({ test }: { test: Test }) {
 
       {/* Topic content */}
       <div style={{ maxWidth: 720, margin: "0 auto", padding: "36px 24px 48px" }}>
-        {currentTopic && (
+        {currentTopic && !singleMode && (
           <>
             <div style={{ marginBottom: 32 }}>
               <div
@@ -577,114 +1120,7 @@ export default function ClientQuiz({ test }: { test: Test }) {
             <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
               {currentTopic.questions.map((q, qi) => {
                 if (!isQuestionActive(q, answers)) return null;
-                const opts = shuffledOptions[q.id] || q.options;
-                const selected = answers[q.id];
-
-                return (
-                  <div key={q.id} className="card" style={{ padding: "22px 24px" }}>
-                    <div style={{ display: "flex", gap: 12, alignItems: "flex-start", marginBottom: 18 }}>
-                      <div
-                        style={{
-                          width: 28,
-                          height: 28,
-                          borderRadius: "50%",
-                          background: selected ? "var(--brand)" : "var(--surface-sunken)",
-                          color: selected ? "#fff" : "var(--ink-3)",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "center",
-                          fontSize: 12,
-                          fontWeight: 700,
-                          flex: "none",
-                          transition: "background .2s, color .2s",
-                          fontFamily: "var(--font-mono)",
-                        }}
-                      >
-                        {qi + 1}
-                      </div>
-                      <p
-                        style={{
-                          fontSize: 15.5,
-                          fontWeight: 600,
-                          color: "var(--ink)",
-                          lineHeight: 1.45,
-                          marginTop: 3,
-                        }}
-                      >
-                        {q.text}
-                      </p>
-                    </div>
-
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8, paddingLeft: 40 }}>
-                      {opts.map((opt) => {
-                        const isSelected = selected === opt.id;
-                        return (
-                          <label
-                            key={opt.id}
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 12,
-                              padding: "10px 14px",
-                              borderRadius: "var(--r-sm)",
-                              border: `1.5px solid ${isSelected ? "var(--brand)" : "var(--line-2)"}`,
-                              background: isSelected ? "color-mix(in srgb, var(--brand) 8%, transparent)" : "var(--surface)",
-                              cursor: "pointer",
-                              transition: "border-color .15s, background .15s",
-                              userSelect: "none",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name={q.id}
-                              value={opt.id}
-                              checked={isSelected}
-                              onChange={() => handleAnswer(q.id, opt.id)}
-                              style={{ display: "none" }}
-                            />
-                            {/* Custom radio indicator */}
-                            <div
-                              style={{
-                                width: 18,
-                                height: 18,
-                                borderRadius: "50%",
-                                border: `2px solid ${isSelected ? "var(--brand)" : "var(--line-strong)"}`,
-                                background: isSelected ? "var(--brand)" : "transparent",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                                flex: "none",
-                                transition: "border-color .15s, background .15s",
-                              }}
-                            >
-                              {isSelected && (
-                                <div
-                                  style={{
-                                    width: 7,
-                                    height: 7,
-                                    borderRadius: "50%",
-                                    background: "#fff",
-                                  }}
-                                />
-                              )}
-                            </div>
-                            <span
-                              style={{
-                                fontSize: 14.5,
-                                fontWeight: isSelected ? 600 : 500,
-                                color: isSelected ? "var(--ink)" : "var(--ink-2)",
-                                lineHeight: 1.4,
-                                flex: 1,
-                              }}
-                            >
-                              {opt.label}
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
+                return renderQuestionCard(q, qi + 1);
               })}
             </div>
 
@@ -712,8 +1148,8 @@ export default function ClientQuiz({ test }: { test: Test }) {
               <button
                 type="button"
                 className="btn btn-lg"
-                onClick={handleNext}
-                disabled={!allActiveAnswered}
+                onClick={handleNextClassic}
+                aria-disabled={!allActiveAnswered}
                 style={{
                   background: allActiveAnswered ? "var(--brand)" : "var(--surface-sunken)",
                   color: allActiveAnswered ? "#fff" : "var(--ink-4)",
@@ -745,7 +1181,118 @@ export default function ClientQuiz({ test }: { test: Test }) {
                   color: "var(--ink-4)",
                 }}
               >
-                Responde todas las preguntas para continuar
+                Te falta{pendingInTopic !== 1 ? "n" : ""} {pendingInTopic} pregunta{pendingInTopic !== 1 ? "s" : ""} en este tema — pulsa «Siguiente» para ir a la primera pendiente
+              </p>
+            )}
+          </>
+        )}
+
+        {/* One-question-at-a-time mode */}
+        {currentTopic && singleMode && (
+          <>
+            <div style={{ marginBottom: safeQIndex === 0 ? 28 : 18 }}>
+              <div className="eyebrow" style={{ marginBottom: 8, color: "var(--brand)" }}>
+                Tema {topicIndex + 1} · {currentTopic.name}
+              </div>
+              {safeQIndex === 0 && (
+                <>
+                  <h2
+                    style={{
+                      fontSize: "clamp(20px, 4vw, 28px)",
+                      fontWeight: 800,
+                      letterSpacing: "-.02em",
+                      lineHeight: 1.15,
+                      color: "var(--ink)",
+                    }}
+                  >
+                    {currentTopic.name}
+                  </h2>
+                  {currentTopic.description && (
+                    <p style={{ color: "var(--ink-3)", fontSize: 14, marginTop: 8, lineHeight: 1.6 }}>
+                      {currentTopic.description}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+
+            {currentQuestion ? (
+              <>
+                <div
+                  className="mono"
+                  style={{ fontSize: 12, color: "var(--ink-3)", fontWeight: 600, marginBottom: 10 }}
+                >
+                  Pregunta {globalIdx} de {allActive.length}
+                </div>
+                {renderQuestionCard(currentQuestion, globalIdx, true)}
+              </>
+            ) : (
+              <p style={{ fontSize: 14, color: "var(--ink-3)" }}>
+                Este tema no tiene preguntas activas.
+              </p>
+            )}
+
+            {/* Single-mode navigation */}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginTop: 28,
+                gap: 12,
+              }}
+            >
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={goBackSingle}
+                disabled={topicIndex === 0 && safeQIndex === 0}
+                style={{
+                  opacity: topicIndex === 0 && safeQIndex === 0 ? 0 : 1,
+                  pointerEvents: topicIndex === 0 && safeQIndex === 0 ? "none" : "auto",
+                }}
+              >
+                <Icon name="arrowLeft" size={16} />
+                Atrás
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-lg"
+                onClick={handleNextSingle}
+                aria-disabled={!currentAnswered}
+                style={{
+                  background: currentAnswered ? "var(--brand)" : "var(--surface-sunken)",
+                  color: currentAnswered ? "#fff" : "var(--ink-4)",
+                  border: "none",
+                  boxShadow: currentAnswered ? "0 4px 14px rgba(0,0,0,.15)" : "none",
+                  transition: "background .2s, color .2s, box-shadow .2s",
+                }}
+              >
+                {isFinalQuestion ? (
+                  <>
+                    Enviar
+                    <Icon name="send" size={17} />
+                  </>
+                ) : (
+                  <>
+                    Siguiente
+                    <Icon name="arrowRight" size={17} />
+                  </>
+                )}
+              </button>
+            </div>
+
+            {!currentAnswered && currentQuestion && (
+              <p
+                style={{
+                  textAlign: "center",
+                  marginTop: 12,
+                  fontSize: 13,
+                  color: "var(--ink-4)",
+                }}
+              >
+                Elige una opción para continuar
               </p>
             )}
           </>

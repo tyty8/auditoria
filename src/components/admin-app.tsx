@@ -2,7 +2,9 @@
 import React, { useState, useCallback, useEffect, Suspense } from "react";
 import { useStore } from "./store";
 import { AdminTopbar } from "./topbar";
-import { useToast } from "./ui";
+import { useToast, Skeleton, SkeletonCard } from "./ui";
+import { CommandPalette, useGlobalShortcuts, ShortcutsModal } from "./command-palette";
+import { OnboardingTour } from "./onboarding-tour";
 
 // ---- Route types ----
 type Route = { name: string; testId?: string; company?: string };
@@ -39,11 +41,18 @@ function parseHash(): Route {
   return { name: "inicio" };
 }
 
-// ---- Suspense fallback ----
+// ---- Suspense fallback (skeleton layout instead of plain text) ----
 function PageFallback() {
   return (
-    <div style={{ padding: 40, textAlign: "center", color: "var(--ink-3)" }}>
-      Cargando…
+    <div style={{ maxWidth: "var(--maxw)", margin: "0 auto", padding: "32px 28px" }} aria-busy="true">
+      <Skeleton width={260} height={26} style={{ marginBottom: 10 }} />
+      <Skeleton width={420} height={14} style={{ marginBottom: 28 }} />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 16, marginBottom: 24 }}>
+        <SkeletonCard lines={1} /><SkeletonCard lines={1} /><SkeletonCard lines={1} /><SkeletonCard lines={1} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))", gap: 16 }}>
+        <SkeletonCard lines={3} /><SkeletonCard lines={3} />
+      </div>
     </div>
   );
 }
@@ -76,6 +85,9 @@ export default function AdminApp() {
     window.addEventListener("hashchange", onHash);
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
+
+  // global keyboard shortcuts (g+letter, ? for cheat sheet)
+  const [cheatOpen, setCheatOpen] = useGlobalShortcuts(nav);
 
   function renderPage() {
     switch (route.name) {
@@ -154,10 +166,18 @@ export default function AdminApp() {
     }
   }
 
+  // key the page wrapper by route so navigation gets a subtle entrance animation
+  const routeKey = route.name + (route.testId || "") + (route.company || "");
+
   return (
     <div style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <AdminTopbar route={route.name} onNav={nav} />
-      {renderPage()}
+      <div key={routeKey} className="page-enter">
+        {renderPage()}
+      </div>
+      <CommandPalette nav={nav} />
+      <ShortcutsModal open={cheatOpen} onClose={() => setCheatOpen(false)} />
+      <OnboardingTour />
       {toastNode}
     </div>
   );

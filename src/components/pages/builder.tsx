@@ -2,7 +2,7 @@
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import { useStore } from "@/components/store";
 import type { TestSummary, InvitationRow } from "@/components/store";
-import { Icon, EmptyState, PageWrap, Modal } from "@/components/ui";
+import { Icon, EmptyState, PageWrap, Modal, Drawer, ConfirmModal, ScoreRing, timeAgo } from "@/components/ui";
 import { ShareModal } from "@/components/share-modal";
 import { uid } from "@/lib/scoring";
 import type { Topic, Question, Option, Solution, Condition, Branding } from "@/lib/schema";
@@ -51,6 +51,123 @@ function blankSolution(): Solution {
     link: null,
     actions: [],
   };
+}
+
+/** Deep-copy a question with fresh ids. showIf is kept by default (valid when
+ *  duplicating within the same topic) or stripped for cross-test imports. */
+function copyQuestion(q: Question, keepShowIf: boolean): Question {
+  return {
+    id: uid("q"),
+    text: q.text,
+    options: q.options.map((o) => ({ ...o, id: uid("o") })),
+    showIf: keepShowIf ? q.showIf || null : null,
+  };
+}
+
+/** Deep-copy a topic with fresh ids, remapping internal showIf references. */
+function copyTopic(t: Topic): Topic {
+  const qMap = new Map<string, string>();
+  const oMap = new Map<string, string>();
+  const questions = t.questions.map((q) => {
+    const nq = uid("q");
+    qMap.set(q.id, nq);
+    return {
+      id: nq,
+      text: q.text,
+      options: q.options.map((o) => {
+        const no = uid("o");
+        oMap.set(o.id, no);
+        return { ...o, id: no };
+      }),
+      showIf: q.showIf || null,
+    };
+  });
+  // Remap showIf references to the freshly generated ids (drop if external).
+  const remapped: Question[] = questions.map((q) => {
+    if (!q.showIf || !qMap.has(q.showIf.questionId)) return { ...q, showIf: null };
+    return {
+      ...q,
+      showIf: {
+        questionId: qMap.get(q.showIf.questionId)!,
+        optionIds: q.showIf.optionIds.map((o) => oMap.get(o) || o),
+      },
+    };
+  });
+  return { ...t, id: uid("t"), name: (t.name || "Tema") + " (copia)", questions: remapped };
+}
+
+/** Move item at `from` to insertion position `to` (0..arr.length). */
+function moveItem<T>(arr: T[], from: number, to: number): T[] {
+  const next = arr.slice();
+  const [item] = next.splice(from, 1);
+  next.splice(from < to ? to - 1 : to, 0, item);
+  return next;
+}
+
+// ---- Drag & drop list item (native HTML5 DnD, grip-armed) ----
+function DragItem({ typeKey, index, count, ins, setIns, onReorder, children }: {
+  typeKey: string;
+  index: number;
+  count: number;
+  ins: number | null;
+  setIns: (n: number | null) => void;
+  onReorder: (from: number, to: number) => void;
+  children: (grip: React.ReactNode) => React.ReactNode;
+}) {
+  const [armed, setArmed] = useState(false);
+
+  const grip = (
+    <span
+      title="Arrastrar para reordenar"
+      onMouseDown={() => {
+        setArmed(true);
+        const up = () => { setArmed(false); window.removeEventListener("mouseup", up); };
+        window.addEventListener("mouseup", up);
+      }}
+      style={{ cursor: "grab", color: "var(--ink-4)", display: "inline-flex", alignItems: "center", padding: "2px 1px", flex: "none", touchAction: "none" }}
+    >
+      <Icon name="grip" size={15} />
+    </span>
+  );
+
+  const bar: React.CSSProperties = { position: "absolute", left: 4, right: 4, height: 3, borderRadius: 2, background: "var(--primary)", zIndex: 6, pointerEvents: "none" };
+
+  return (
+    <div
+      draggable={armed}
+      onDragStart={(e) => {
+        e.stopPropagation();
+        e.dataTransfer.setData(typeKey, String(index));
+        e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragEnd={() => { setArmed(false); setIns(null); }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(typeKey)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        e.dataTransfer.dropEffect = "move";
+        const r = e.currentTarget.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        setIns(index + (after ? 1 : 0));
+      }}
+      onDrop={(e) => {
+        if (!e.dataTransfer.types.includes(typeKey)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const from = Number(e.dataTransfer.getData(typeKey));
+        const r = e.currentTarget.getBoundingClientRect();
+        const after = e.clientY > r.top + r.height / 2;
+        const to = index + (after ? 1 : 0);
+        setIns(null);
+        if (!Number.isNaN(from) && from !== to && from !== to - 1) onReorder(from, to);
+      }}
+      style={{ position: "relative" }}
+    >
+      {ins === index && <div style={{ ...bar, top: -2 }} />}
+      {index === count - 1 && ins === count && <div style={{ ...bar, bottom: -2 }} />}
+      {children(grip)}
+    </div>
+  );
 }
 
 // ---- Segmented control ----
@@ -157,11 +274,13 @@ function TagEditor({ tags, allTags, onChange }: { tags: string[]; allTags: strin
 }
 
 // ---- Option row ----
-function OptionRow({ opt, scoring, onChange, onDelete, isOnly }: {
-  opt: Option; scoring: string; onChange: (o: Option) => void; onDelete: () => void; isOnly: boolean;
+function OptionRow({ opt, scoring, onChange, onDelete, onEnter, isOnly, grip, autoFocus }: {
+  opt: Option; scoring: string; onChange: (o: Option) => void; onDelete: () => void;
+  onEnter: () => void; isOnly: boolean; grip: React.ReactNode; autoFocus: boolean;
 }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--line)" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: "1px solid var(--line)", background: "var(--surface)" }}>
+      {grip}
       {scoring === "percent" && (
         <button type="button"
           style={{ width: 20, height: 20, borderRadius: 99, border: "2px solid " + (opt.correct ? "var(--primary)" : "var(--line-strong)"), background: opt.correct ? "var(--primary)" : "transparent", flex: "none", cursor: "pointer", transition: "all .14s", display: "flex", alignItems: "center", justifyContent: "center" }}
@@ -172,9 +291,13 @@ function OptionRow({ opt, scoring, onChange, onDelete, isOnly }: {
       <input
         className="input"
         value={opt.label}
+        autoFocus={autoFocus}
+        onFocus={(e) => { if (autoFocus) e.currentTarget.select(); }}
         onChange={(e) => onChange({ ...opt, label: e.target.value })}
+        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); onEnter(); } }}
         style={{ flex: 1, fontSize: 13, padding: "6px 10px" }}
         placeholder="Texto de opción"
+        title="Enter agrega una nueva opción"
       />
       {scoring === "weighted" && (
         <input
@@ -194,23 +317,39 @@ function OptionRow({ opt, scoring, onChange, onDelete, isOnly }: {
 }
 
 // ---- Question card ----
-function QuestionCard({ q, topicScoring, onChange, onDelete, index }: {
-  q: Question; topicScoring: string; onChange: (q: Question) => void; onDelete: () => void; index: number;
+function QuestionCard({ q, topicScoring, onChange, onDelete, onDuplicate, index, grip }: {
+  q: Question; topicScoring: string; onChange: (q: Question) => void; onDelete: () => void;
+  onDuplicate: () => void; index: number; grip: React.ReactNode;
 }) {
+  const [optIns, setOptIns] = useState<number | null>(null);
+  const [focusOptId, setFocusOptId] = useState<string | null>(null);
+  const optKey = "text/x-aud-o-" + q.id.toLowerCase();
+
   function updateOption(optId: string, patch: Partial<Option>) {
     onChange({ ...q, options: q.options.map((o) => o.id === optId ? { ...o, ...patch } : o) });
   }
   function deleteOption(optId: string) {
     onChange({ ...q, options: q.options.filter((o) => o.id !== optId) });
   }
-  function addOption() {
-    onChange({ ...q, options: [...q.options, blankOption()] });
+  function addOption(afterIndex?: number) {
+    const o = blankOption();
+    const opts = q.options.slice();
+    if (afterIndex == null) opts.push(o);
+    else opts.splice(afterIndex + 1, 0, o);
+    setFocusOptId(o.id);
+    onChange({ ...q, options: opts });
+  }
+  function reorderOptions(from: number, to: number) {
+    onChange({ ...q, options: moveItem(q.options, from, to) });
   }
 
   return (
-    <div className="card" style={{ padding: "14px 16px", marginBottom: 10 }}>
+    <div className="card" data-builder-id={q.id} style={{ padding: "14px 16px", marginBottom: 10 }}>
       <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
-        <div className="eyebrow" style={{ marginTop: 8, minWidth: 22, textAlign: "center" }}>{index + 1}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8 }}>
+          {grip}
+          <div className="eyebrow" style={{ minWidth: 22, textAlign: "center" }}>{index + 1}</div>
+        </div>
         <textarea
           className="textarea"
           value={q.text}
@@ -218,6 +357,9 @@ function QuestionCard({ q, topicScoring, onChange, onDelete, index }: {
           placeholder="Texto de la pregunta"
           style={{ flex: 1, fontSize: 14, minHeight: 54, resize: "vertical" }}
         />
+        <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={onDuplicate} title="Duplicar pregunta" style={{ padding: 5, width: 28, height: 28 }}>
+          <Icon name="copy" size={14} />
+        </button>
         <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={onDelete} title="Eliminar pregunta" style={{ padding: 5, width: 28, height: 28 }}>
           <Icon name="trash" size={14} />
         </button>
@@ -225,6 +367,7 @@ function QuestionCard({ q, topicScoring, onChange, onDelete, index }: {
       <div style={{ marginLeft: 32 }}>
         {topicScoring === "weighted" && (
           <div style={{ display: "flex", gap: 8, paddingBottom: 6, marginBottom: 4 }}>
+            <div style={{ width: 17 }} />
             <div style={{ flex: 1, fontSize: 11, fontWeight: 700, color: "var(--ink-3)", letterSpacing: ".05em", textTransform: "uppercase" }}>Opción</div>
             <div style={{ width: 70, fontSize: 11, fontWeight: 700, color: "var(--ink-3)", letterSpacing: ".05em", textTransform: "uppercase", textAlign: "right" }}>Puntos</div>
             <div style={{ width: 28 }} />
@@ -232,22 +375,29 @@ function QuestionCard({ q, topicScoring, onChange, onDelete, index }: {
         )}
         {topicScoring === "percent" && (
           <div style={{ display: "flex", gap: 8, paddingBottom: 6, marginBottom: 4 }}>
+            <div style={{ width: 17 }} />
             <div style={{ width: 20 }} />
             <div style={{ flex: 1, fontSize: 11, fontWeight: 700, color: "var(--ink-3)", letterSpacing: ".05em", textTransform: "uppercase" }}>Opción</div>
             <div style={{ width: 28 }} />
           </div>
         )}
-        {q.options.map((opt) => (
-          <OptionRow
-            key={opt.id}
-            opt={opt}
-            scoring={topicScoring}
-            onChange={(o) => updateOption(opt.id, o)}
-            onDelete={() => deleteOption(opt.id)}
-            isOnly={q.options.length <= 1}
-          />
+        {q.options.map((opt, oi) => (
+          <DragItem key={opt.id} typeKey={optKey} index={oi} count={q.options.length} ins={optIns} setIns={setOptIns} onReorder={reorderOptions}>
+            {(optGrip) => (
+              <OptionRow
+                opt={opt}
+                scoring={topicScoring}
+                grip={optGrip}
+                autoFocus={focusOptId === opt.id}
+                onChange={(o) => updateOption(opt.id, o)}
+                onDelete={() => deleteOption(opt.id)}
+                onEnter={() => addOption(oi)}
+                isOnly={q.options.length <= 1}
+              />
+            )}
+          </DragItem>
         ))}
-        <button type="button" className="btn btn-ghost btn-sm" onClick={addOption} style={{ marginTop: 8, fontSize: 12 }}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={() => addOption()} style={{ marginTop: 8, fontSize: 12 }}>
           <Icon name="plus" size={13} /> Agregar opción
         </button>
       </div>
@@ -256,9 +406,13 @@ function QuestionCard({ q, topicScoring, onChange, onDelete, index }: {
 }
 
 // ---- Topic card ----
-function TopicCard({ topic, onChange, onDelete }: {
-  topic: Topic; onChange: (t: Topic) => void; onDelete: () => void;
+function TopicCard({ topic, onChange, onDelete, onDuplicate, collapsed, onToggle, onActive, grip }: {
+  topic: Topic; onChange: (t: Topic) => void; onDelete: () => void; onDuplicate: () => void;
+  collapsed: boolean; onToggle: () => void; onActive: () => void; grip: React.ReactNode;
 }) {
+  const [qIns, setQIns] = useState<number | null>(null);
+  const qKey = "text/x-aud-q-" + topic.id.toLowerCase();
+
   function updateQuestion(qId: string, q: Question) {
     onChange({ ...topic, questions: topic.questions.map((x) => x.id === qId ? q : x) });
   }
@@ -268,11 +422,45 @@ function TopicCard({ topic, onChange, onDelete }: {
   function addQuestion() {
     onChange({ ...topic, questions: [...topic.questions, blankQuestion()] });
   }
+  function duplicateQuestion(i: number) {
+    const copy = copyQuestion(topic.questions[i], true);
+    const next = topic.questions.slice();
+    next.splice(i + 1, 0, copy);
+    onChange({ ...topic, questions: next });
+  }
+  function reorderQuestions(from: number, to: number) {
+    onChange({ ...topic, questions: moveItem(topic.questions, from, to) });
+  }
+
+  const qCount = topic.questions.length;
+
+  if (collapsed) {
+    return (
+      <div className="card" data-builder-id={topic.id} onClick={onActive} style={{ marginBottom: 18, padding: "13px 16px", display: "flex", alignItems: "center", gap: 10 }}>
+        {grip}
+        <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={onToggle} title="Expandir tema" style={{ padding: 4, width: 26, height: 26 }}>
+          <Icon name="chevronRight" size={15} />
+        </button>
+        <span className="clamp-1" style={{ flex: 1, fontWeight: 700, fontSize: 15, color: "var(--ink)", minWidth: 0 }}>{topic.name || "Sin nombre"}</span>
+        <span className="badge">{qCount} pregunta{qCount !== 1 ? "s" : ""}</span>
+        <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={onDuplicate} title="Duplicar tema" style={{ padding: 5, width: 28, height: 28 }}>
+          <Icon name="copy" size={14} />
+        </button>
+        <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={onDelete} title="Eliminar tema" style={{ padding: 5, width: 28, height: 28 }}>
+          <Icon name="trash" size={14} />
+        </button>
+      </div>
+    );
+  }
 
   return (
-    <div className="card fade-up" style={{ marginBottom: 18, overflow: "visible" }}>
+    <div className="card fade-up" data-builder-id={topic.id} onFocusCapture={onActive} onClick={onActive} style={{ marginBottom: 18, overflow: "visible" }}>
       <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--line)", background: "var(--surface-2)", borderRadius: "var(--r-lg) var(--r-lg) 0 0" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          {grip}
+          <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={onToggle} title="Contraer tema" style={{ padding: 4, width: 26, height: 26 }}>
+            <Icon name="chevronDown" size={15} />
+          </button>
           <InlineInput
             value={topic.name}
             onChange={(v) => onChange({ ...topic, name: v })}
@@ -305,6 +493,9 @@ function TopicCard({ topic, onChange, onDelete }: {
                 </select>
               </div>
             )}
+            <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={onDuplicate} title="Duplicar tema">
+              <Icon name="copy" size={15} />
+            </button>
             <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={onDelete} title="Eliminar tema">
               <Icon name="trash" size={15} />
             </button>
@@ -325,14 +516,19 @@ function TopicCard({ topic, onChange, onDelete }: {
           </div>
         )}
         {topic.questions.map((q, i) => (
-          <QuestionCard
-            key={q.id}
-            q={q}
-            topicScoring={topic.scoring}
-            index={i}
-            onChange={(updated) => updateQuestion(q.id, updated)}
-            onDelete={() => deleteQuestion(q.id)}
-          />
+          <DragItem key={q.id} typeKey={qKey} index={i} count={topic.questions.length} ins={qIns} setIns={setQIns} onReorder={reorderQuestions}>
+            {(qGrip) => (
+              <QuestionCard
+                q={q}
+                topicScoring={topic.scoring}
+                index={i}
+                grip={qGrip}
+                onChange={(updated) => updateQuestion(q.id, updated)}
+                onDelete={() => deleteQuestion(q.id)}
+                onDuplicate={() => duplicateQuestion(i)}
+              />
+            )}
+          </DragItem>
         ))}
         <button type="button" className="btn btn-secondary btn-sm" onClick={addQuestion}>
           <Icon name="plus" size={14} /> Agregar pregunta
@@ -342,11 +538,156 @@ function TopicCard({ topic, onChange, onDelete }: {
   );
 }
 
+// ---- Live preview pane (respondent view of the active topic) ----
+function PreviewPane({ topic, accent }: { topic: Topic | null; accent: string }) {
+  return (
+    <div className="card" style={{ overflow: "hidden", maxHeight: "calc(100vh - 150px)", display: "flex", flexDirection: "column" }}>
+      <div style={{ height: 6, background: accent, flex: "none" }} />
+      <div style={{ padding: "16px 18px", overflowY: "auto" }}>
+        {!topic ? (
+          <div style={{ textAlign: "center", padding: "30px 0", color: "var(--ink-3)", fontSize: 13 }}>
+            Selecciona o edita un tema para verlo aquí.
+          </div>
+        ) : (
+          <>
+            <h3 style={{ fontSize: 16, fontWeight: 800, color: "var(--ink)" }}>{topic.name || "Sin nombre"}</h3>
+            {topic.description && (
+              <p style={{ fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.5, marginTop: 4 }}>{topic.description}</p>
+            )}
+            {topic.questions.length === 0 && (
+              <div style={{ textAlign: "center", padding: "26px 0", color: "var(--ink-3)", fontSize: 13 }}>
+                Este tema aún no tiene preguntas.
+              </div>
+            )}
+            {topic.questions.map((q, i) => (
+              <div key={q.id} style={{ marginTop: 16 }}>
+                <div style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+                  <span style={{ width: 20, height: 20, borderRadius: 99, background: accent, color: "#fff", fontSize: 11, fontWeight: 800, display: "inline-flex", alignItems: "center", justifyContent: "center", flex: "none", marginTop: 1 }}>{i + 1}</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 600, color: "var(--ink)", lineHeight: 1.45 }}>{q.text || "(pregunta sin texto)"}</span>
+                </div>
+                <div style={{ marginLeft: 29, marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {q.options.map((o) => (
+                    <div key={o.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 11px", border: "1px solid var(--line-2)", borderRadius: "var(--r-sm)", fontSize: 13, color: "var(--ink-2)", background: "var(--surface)" }}>
+                      <span style={{ width: 15, height: 15, borderRadius: 99, border: `2px solid ${accent}`, opacity: .55, flex: "none" }} />
+                      {o.label || "(opción sin texto)"}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- Question bank (reuse questions from other tests) ----
+function QuestionBankModal({ open, onClose, currentTest, onImport }: {
+  open: boolean; onClose: () => void; currentTest: TestSummary;
+  onImport: (questions: Question[]) => void;
+}) {
+  const { tests } = useStore();
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Map<string, Question>>(new Map());
+
+  useEffect(() => {
+    if (open) { setSelected(new Map()); setExpanded(new Set()); }
+  }, [open]);
+
+  const sources = useMemo(
+    () => tests.filter((t) => t.id !== currentTest.id && t.mode === currentTest.mode && (t.topics || []).some((tp) => tp.questions.length > 0)),
+    [tests, currentTest.id, currentTest.mode]
+  );
+
+  function toggleExpand(id: string) {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function toggleQuestion(key: string, q: Question) {
+    setSelected((prev) => {
+      const next = new Map(prev);
+      if (next.has(key)) next.delete(key); else next.set(key, q);
+      return next;
+    });
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} width={680} title="Reutilizar preguntas" sub="Importa preguntas de otros cuestionarios del mismo modo. Se copiarán con identificadores nuevos.">
+      {sources.length === 0 ? (
+        <EmptyState icon="layers" title="Sin cuestionarios compatibles" sub="No hay otros cuestionarios con preguntas en este modo." />
+      ) : (
+        <div style={{ maxHeight: 420, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
+          {sources.map((src) => {
+            const qTotal = (src.topics || []).reduce((n, tp) => n + tp.questions.length, 0);
+            const isOpen = expanded.has(src.id);
+            return (
+              <div key={src.id} className="card" style={{ overflow: "hidden" }}>
+                <button
+                  type="button"
+                  onClick={() => toggleExpand(src.id)}
+                  style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "11px 14px", background: "var(--surface-2)", border: "none", cursor: "pointer", textAlign: "left" }}
+                >
+                  <Icon name={isOpen ? "chevronDown" : "chevronRight"} size={15} style={{ color: "var(--ink-3)" }} />
+                  <span className="clamp-1" style={{ flex: 1, fontWeight: 700, fontSize: 14, color: "var(--ink)", minWidth: 0 }}>{src.name}</span>
+                  <span className="badge">{qTotal} pregunta{qTotal !== 1 ? "s" : ""}</span>
+                </button>
+                {isOpen && (
+                  <div style={{ padding: "8px 14px 12px" }}>
+                    {(src.topics || []).filter((tp) => tp.questions.length > 0).map((tp) => (
+                      <div key={tp.id} style={{ marginTop: 6 }}>
+                        <div className="eyebrow" style={{ marginBottom: 5 }}>{tp.name}</div>
+                        {tp.questions.map((q) => {
+                          const key = `${src.id}:${q.id}`;
+                          return (
+                            <label key={q.id} style={{ display: "flex", alignItems: "center", gap: 9, padding: "6px 4px", cursor: "pointer", borderBottom: "1px solid var(--line)" }}>
+                              <input
+                                type="checkbox"
+                                checked={selected.has(key)}
+                                onChange={() => toggleQuestion(key, q)}
+                                style={{ accentColor: "var(--primary)", width: 15, height: 15, flex: "none", cursor: "pointer" }}
+                              />
+                              <span className="clamp-1" style={{ flex: 1, fontSize: 13, color: "var(--ink)", minWidth: 0 }}>{q.text || "(sin texto)"}</span>
+                              <span style={{ fontSize: 11.5, color: "var(--ink-3)", flex: "none" }}>{q.options.length} opciones</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 16, gap: 10 }}>
+        <span style={{ fontSize: 13, color: "var(--ink-2)", fontWeight: 600 }}>
+          {selected.size} seleccionada{selected.size !== 1 ? "s" : ""}
+        </span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={onClose}>Cancelar</button>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={selected.size === 0}
+            onClick={() => onImport(Array.from(selected.values()))}
+          >
+            <Icon name="copy" size={14} /> Importar ({selected.size})
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ---- Condition row ----
 function ConditionRow({ cond, topics, onChange, onDelete, canDelete }: {
   cond: Condition; topics: Topic[]; onChange: (c: Condition) => void; onDelete: () => void; canDelete: boolean;
 }) {
-  const operatorLabels: Record<string, string> = { below: "≤", above: "≥", between: "entre" };
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
       <select
@@ -409,6 +750,15 @@ function ConditionRow({ cond, topics, onChange, onDelete, canDelete }: {
   );
 }
 
+// ---- Plain-language description of a condition ----
+function conditionText(c: Condition, topics: Topic[]): string {
+  const subject = c.scope === "overall"
+    ? "el puntaje global"
+    : `el tema "${topics.find((t) => t.id === c.topicId)?.name || "(sin seleccionar)"}"`;
+  if (c.operator === "between") return `${subject} está entre ${c.threshold} y ${c.threshold2 ?? 100}`;
+  return `${subject} es ${c.operator === "below" ? "≤" : "≥"} ${c.threshold}`;
+}
+
 // ---- Solution card ----
 function SolutionCard({ sol, topics, onChange, onDelete }: {
   sol: Solution; topics: Topic[]; onChange: (s: Solution) => void; onDelete: () => void;
@@ -440,8 +790,11 @@ function SolutionCard({ sol, topics, onChange, onDelete }: {
     onChange({ ...sol, actions: (sol.actions || []).map((a, idx) => idx === i ? v : a) });
   }
 
+  const joiner = (sol.logic || "all") === "any" ? " O " : " Y ";
+  const preview = conditions.map((c) => conditionText(c, topics)).join(joiner);
+
   return (
-    <div className="card fade-up" style={{ marginBottom: 16 }}>
+    <div className="card fade-up" data-builder-id={sol.id} style={{ marginBottom: 16 }}>
       <div style={{ padding: "14px 18px", borderBottom: "1px solid var(--line)", background: "var(--surface-2)", borderRadius: "var(--r-lg) var(--r-lg) 0 0", display: "flex", alignItems: "flex-start", gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <InlineInput
@@ -497,6 +850,11 @@ function SolutionCard({ sol, topics, onChange, onDelete }: {
               canDelete={conditions.length > 1}
             />
           ))}
+          {/* Plain-language preview */}
+          <div style={{ marginTop: 10, display: "flex", alignItems: "flex-start", gap: 8, padding: "9px 12px", background: "var(--surface-sunken)", borderRadius: "var(--r-sm)", fontSize: 12.5, color: "var(--ink-2)", lineHeight: 1.55 }}>
+            <Icon name="eye" size={14} style={{ flex: "none", marginTop: 2, color: "var(--ink-3)" }} />
+            <span>Se mostrará si {preview}.</span>
+          </div>
           <button type="button" className="btn btn-ghost btn-sm" onClick={addCond} style={{ marginTop: 8, fontSize: 12 }}>
             <Icon name="plus" size={13} /> Agregar condición
           </button>
@@ -563,8 +921,16 @@ function SolutionCard({ sol, topics, onChange, onDelete }: {
 }
 
 // ---- Temas tab ----
-function TemasTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Partial<TestSummary>) => void }) {
+const TOPIC_KEY = "text/x-aud-topic";
+
+function TemasTab({ test, onUpdate, toast }: { test: TestSummary; onUpdate: (patch: Partial<TestSummary>) => void; toast: ToastFn }) {
   const { tests } = useStore();
+  const [topicIns, setTopicIns] = useState<number | null>(null);
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [previewOn, setPreviewOn] = useState(false);
+  const [bankOpen, setBankOpen] = useState(false);
+  const [activeTopicId, setActiveTopicId] = useState<string | null>(null);
+
   const allTags = useMemo(() => {
     const set = new Set<string>();
     tests.forEach((t) => (t.tags || []).forEach((tag) => set.add(tag)));
@@ -572,6 +938,8 @@ function TemasTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Par
   }, [tests]);
 
   const topics: Topic[] = test.topics || [];
+  const accent = test.branding?.accent || test.accent || "#1f8a5b";
+  const activeTopic = topics.find((t) => t.id === activeTopicId) || topics[0] || null;
 
   function updateTopic(id: string, updated: Topic) {
     onUpdate({ topics: topics.map((t) => t.id === id ? updated : t) });
@@ -580,47 +948,123 @@ function TemasTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Par
     onUpdate({ topics: topics.filter((t) => t.id !== id) });
   }
   function addTopic() {
-    onUpdate({ topics: [...topics, blankTopic()] });
+    const t = blankTopic();
+    setActiveTopicId(t.id);
+    onUpdate({ topics: [...topics, t] });
+  }
+  function duplicateTopic(i: number) {
+    const copy = copyTopic(topics[i]);
+    const next = topics.slice();
+    next.splice(i + 1, 0, copy);
+    setActiveTopicId(copy.id);
+    onUpdate({ topics: next });
+    toast("Tema duplicado", "copy");
+  }
+  function reorderTopics(from: number, to: number) {
+    onUpdate({ topics: moveItem(topics, from, to) });
+  }
+  function toggleCollapsed(id: string) {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+  function importQuestions(qs: Question[]) {
+    const copies = qs.map((q) => copyQuestion(q, false));
+    const target = activeTopic && topics.some((t) => t.id === activeTopic.id) ? activeTopic.id : null;
+    if (target) {
+      onUpdate({ topics: topics.map((t) => t.id === target ? { ...t, questions: [...t.questions, ...copies] } : t) });
+    } else {
+      onUpdate({ topics: [...topics, { ...blankTopic(), name: "Preguntas importadas", questions: copies }] });
+    }
+    setBankOpen(false);
+    toast(`${copies.length} pregunta${copies.length !== 1 ? "s" : ""} importada${copies.length !== 1 ? "s" : ""}`, "copy");
   }
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-      {/* Tags + Description */}
-      <div className="card" style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
-        <TagEditor tags={test.tags || []} allTags={allTags} onChange={(tags) => onUpdate({ tags })} />
+    <div style={{ display: "grid", gridTemplateColumns: previewOn ? "minmax(0, 1fr) 380px" : "minmax(0, 1fr)", gap: 24, alignItems: "start" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 24, minWidth: 0 }}>
+        {/* Tags + Description */}
+        <div className="card" style={{ padding: "18px 20px", display: "flex", flexDirection: "column", gap: 16 }}>
+          <TagEditor tags={test.tags || []} allTags={allTags} onChange={(tags) => onUpdate({ tags })} />
+          <div>
+            <label className="field-label">Descripción del cuestionario</label>
+            <textarea
+              className="textarea"
+              value={test.description || ""}
+              onChange={(e) => onUpdate({ description: e.target.value })}
+              placeholder="Describe el propósito de este cuestionario…"
+              style={{ fontSize: 14, minHeight: 72 }}
+            />
+          </div>
+        </div>
+
+        {/* Topics */}
         <div>
-          <label className="field-label">Descripción del cuestionario</label>
-          <textarea
-            className="textarea"
-            value={test.description || ""}
-            onChange={(e) => onUpdate({ description: e.target.value })}
-            placeholder="Describe el propósito de este cuestionario…"
-            style={{ fontSize: 14, minHeight: 72 }}
-          />
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700 }}>Temas</h2>
+              <span className="badge">{topics.length} tema{topics.length !== 1 ? "s" : ""}</span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              {topics.length > 0 && (
+                <>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setCollapsed(new Set(topics.map((t) => t.id)))} title="Contraer todos los temas">
+                    <Icon name="chevronRight" size={14} /> Contraer todo
+                  </button>
+                  <button type="button" className="btn btn-ghost btn-sm" onClick={() => setCollapsed(new Set())} title="Expandir todos los temas">
+                    <Icon name="chevronDown" size={14} /> Expandir todo
+                  </button>
+                </>
+              )}
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setBankOpen(true)}>
+                <Icon name="layers" size={14} /> Reutilizar preguntas
+              </button>
+              <button
+                type="button"
+                className={"btn btn-sm " + (previewOn ? "btn-primary" : "btn-secondary") + " hide-mobile"}
+                onClick={() => setPreviewOn((v) => !v)}
+                title="Mostrar/ocultar la vista del respondente"
+              >
+                <Icon name="eye" size={14} /> Vista previa
+              </button>
+            </div>
+          </div>
+          {topics.length === 0 && (
+            <EmptyState icon="layers" title="Sin temas" sub="Agrega un tema para comenzar a estructurar el cuestionario." />
+          )}
+          {topics.map((topic, i) => (
+            <DragItem key={topic.id} typeKey={TOPIC_KEY} index={i} count={topics.length} ins={topicIns} setIns={setTopicIns} onReorder={reorderTopics}>
+              {(grip) => (
+                <TopicCard
+                  topic={topic}
+                  grip={grip}
+                  collapsed={collapsed.has(topic.id)}
+                  onToggle={() => toggleCollapsed(topic.id)}
+                  onActive={() => setActiveTopicId(topic.id)}
+                  onChange={(updated) => updateTopic(topic.id, updated)}
+                  onDelete={() => deleteTopic(topic.id)}
+                  onDuplicate={() => duplicateTopic(i)}
+                />
+              )}
+            </DragItem>
+          ))}
+          <button type="button" className="btn btn-secondary" onClick={addTopic}>
+            <Icon name="plus" size={15} /> Agregar tema
+          </button>
         </div>
       </div>
 
-      {/* Topics */}
-      <div>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
-          <h2 style={{ fontSize: 18, fontWeight: 700 }}>Temas</h2>
-          <span className="badge">{topics.length} tema{topics.length !== 1 ? "s" : ""}</span>
+      {/* Live preview pane */}
+      {previewOn && (
+        <div className="hide-mobile" style={{ position: "sticky", top: 80 }}>
+          <div className="eyebrow" style={{ marginBottom: 10 }}>Vista previa · como lo ve el respondente</div>
+          <PreviewPane topic={activeTopic} accent={accent} />
         </div>
-        {topics.length === 0 && (
-          <EmptyState icon="layers" title="Sin temas" sub="Agrega un tema para comenzar a estructurar el cuestionario." />
-        )}
-        {topics.map((topic) => (
-          <TopicCard
-            key={topic.id}
-            topic={topic}
-            onChange={(updated) => updateTopic(topic.id, updated)}
-            onDelete={() => deleteTopic(topic.id)}
-          />
-        ))}
-        <button type="button" className="btn btn-secondary" onClick={addTopic}>
-          <Icon name="plus" size={15} /> Agregar tema
-        </button>
-      </div>
+      )}
+
+      <QuestionBankModal open={bankOpen} onClose={() => setBankOpen(false)} currentTest={test} onImport={importQuestions} />
     </div>
   );
 }
@@ -851,12 +1295,32 @@ function DistribucionTab({ test, testId, toast, onShare }: { test: TestSummary; 
 }
 
 // ---- Marca tab ----
-function MarcaTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Partial<TestSummary>) => void }) {
+const MAX_LOGO_BYTES = 120 * 1024;
+
+function MarcaTab({ test, onUpdate, toast }: { test: TestSummary; onUpdate: (patch: Partial<TestSummary>) => void; toast: ToastFn }) {
   const branding: Branding = test.branding || { coverColor: test.accent || "#1f8a5b", accent: test.accent || "#1f8a5b", orgName: "", thankYou: "Gracias por completar la evaluación." };
+  const [previewView, setPreviewView] = useState<"portada" | "resultado">("portada");
 
   function updateBranding(patch: Partial<Branding>) {
     onUpdate({ branding: { ...branding, ...patch } });
   }
+
+  function handleLogoFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (file.size > MAX_LOGO_BYTES) {
+      toast("El logo supera 120 KB. Usa una imagen más liviana o una URL.", "alert");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => updateBranding({ logoUrl: String(reader.result) });
+    reader.onerror = () => toast("No se pudo leer el archivo", "alert");
+    reader.readAsDataURL(file);
+  }
+
+  const accent = branding.accent || "#1f8a5b";
+  const isDataLogo = !!branding.logoUrl?.startsWith("data:");
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 360px", gap: 24, alignItems: "start" }}>
@@ -887,13 +1351,13 @@ function MarcaTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Par
             <input
               type="color"
               value={branding.accent || "#1f8a5b"}
-              onChange={(e) => { updateBranding({ accent: e.target.value }); onUpdate({ accent: e.target.value }); }}
+              onChange={(e) => { onUpdate({ branding: { ...branding, accent: e.target.value }, accent: e.target.value }); }}
               style={{ width: 46, height: 36, borderRadius: "var(--r-sm)", border: "1px solid var(--line-2)", cursor: "pointer", padding: 3 }}
             />
             <input
               className="input input-mono"
               value={branding.accent || "#1f8a5b"}
-              onChange={(e) => { updateBranding({ accent: e.target.value }); onUpdate({ accent: e.target.value }); }}
+              onChange={(e) => { onUpdate({ branding: { ...branding, accent: e.target.value }, accent: e.target.value }); }}
               style={{ width: 110, fontSize: 13 }}
               placeholder="#1f8a5b"
             />
@@ -909,6 +1373,31 @@ function MarcaTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Par
             style={{ fontSize: 14 }}
           />
         </div>
+
+        {/* Logo */}
+        <div>
+          <label className="field-label">Logo</label>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              className="input"
+              value={isDataLogo ? "" : (branding.logoUrl || "")}
+              onChange={(e) => updateBranding({ logoUrl: e.target.value || undefined })}
+              placeholder={isDataLogo ? "Logo cargado desde archivo" : "https://miempresa.com/logo.png"}
+              style={{ flex: 1, fontSize: 13 }}
+            />
+            <label className="btn btn-secondary btn-sm" style={{ cursor: "pointer", flex: "none" }} title="Subir archivo de imagen (máx. 120 KB)">
+              <Icon name="upload" size={14} /> Subir
+              <input type="file" accept="image/*" onChange={handleLogoFile} style={{ display: "none" }} />
+            </label>
+            {branding.logoUrl && (
+              <button type="button" className="btn btn-danger-ghost btn-sm btn-icon" onClick={() => updateBranding({ logoUrl: undefined })} title="Quitar logo">
+                <Icon name="x" size={14} />
+              </button>
+            )}
+          </div>
+          <p style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 6 }}>URL de imagen o archivo de hasta 120 KB. Se muestra en la portada y en los resultados.</p>
+        </div>
+
         <div>
           <label className="field-label">Mensaje de agradecimiento</label>
           <textarea
@@ -919,48 +1408,307 @@ function MarcaTab({ test, onUpdate }: { test: TestSummary; onUpdate: (patch: Par
             style={{ fontSize: 14, minHeight: 80 }}
           />
         </div>
+
+        {/* CTA block */}
+        <div>
+          <label className="field-label">Bloque de siguientes pasos en resultados</label>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              className="input"
+              value={branding.ctaLabel || ""}
+              onChange={(e) => updateBranding({ ctaLabel: e.target.value })}
+              placeholder="Texto del botón (ej. Agendar llamada)"
+              style={{ flex: 1, fontSize: 13 }}
+            />
+            <input
+              className="input"
+              value={branding.ctaUrl || ""}
+              onChange={(e) => updateBranding({ ctaUrl: e.target.value })}
+              placeholder="https://..."
+              style={{ flex: 1.4, fontSize: 13 }}
+            />
+          </div>
+          <p style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 6 }}>Se muestra al respondente al final, junto a su resultado.</p>
+        </div>
+
+        <Toggle
+          on={!!branding.showBenchmark}
+          onChange={(v) => updateBranding({ showBenchmark: v })}
+          label="Mostrar comparación con el promedio en resultados"
+        />
       </div>
 
-      {/* Preview */}
+      {/* Preview column */}
       <div style={{ position: "sticky", top: 80 }}>
-        <div className="eyebrow" style={{ marginBottom: 10 }}>Vista previa</div>
-        <div className="card" style={{ overflow: "hidden", borderRadius: "var(--r-lg)" }}>
-          {/* Cover strip */}
-          <div style={{ height: 80, background: branding.coverColor || "#1f8a5b", display: "flex", alignItems: "center", justifyContent: "center" }}>
-            {branding.orgName && (
-              <span style={{ color: "#fff", fontWeight: 800, fontSize: 18, letterSpacing: "-.02em" }}>{branding.orgName}</span>
-            )}
-          </div>
-          <div style={{ padding: "18px 20px" }}>
-            <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 8, color: "var(--ink)" }}>{test.name}</h3>
-            {test.description && <p style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.45, marginBottom: 12 }}>{test.description}</p>}
-            <button type="button" className="btn btn-sm" style={{ background: branding.accent || "#1f8a5b", color: "#fff", fontSize: 13 }}>
-              Comenzar evaluación
-            </button>
-            <div style={{ marginTop: 16, padding: "12px 14px", background: "var(--surface-sunken)", borderRadius: "var(--r-md)", fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--ink-3)", marginBottom: 4 }}>Mensaje final</div>
-              {branding.thankYou || "Gracias por completar la evaluación."}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 8 }}>
+          <div className="eyebrow">Vista previa</div>
+          <Seg
+            options={[{ label: "Portada", value: "portada" }, { label: "Resultado", value: "resultado" }]}
+            value={previewView}
+            onChange={(v) => setPreviewView(v as "portada" | "resultado")}
+          />
+        </div>
+
+        {previewView === "portada" ? (
+          <div className="card" style={{ overflow: "hidden", borderRadius: "var(--r-lg)" }}>
+            {/* Cover strip */}
+            <div style={{ minHeight: 80, background: branding.coverColor || "#1f8a5b", display: "flex", alignItems: "center", justifyContent: "center", gap: 12, padding: "14px 16px" }}>
+              {branding.logoUrl && (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img src={branding.logoUrl} alt="Logo" style={{ maxHeight: 40, maxWidth: 130, objectFit: "contain", background: "rgba(255,255,255,.9)", borderRadius: 8, padding: 4 }} />
+              )}
+              {branding.orgName && (
+                <span style={{ color: "#fff", fontWeight: 800, fontSize: 18, letterSpacing: "-.02em" }}>{branding.orgName}</span>
+              )}
+            </div>
+            <div style={{ padding: "18px 20px" }}>
+              <h3 style={{ fontSize: 16, fontWeight: 800, marginBottom: 8, color: "var(--ink)" }}>{test.name}</h3>
+              {test.description && <p style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.45, marginBottom: 12 }}>{test.description}</p>}
+              <button type="button" className="btn btn-sm" style={{ background: accent, color: "#fff", fontSize: 13 }}>
+                Comenzar evaluación
+              </button>
+              <div style={{ marginTop: 16, padding: "12px 14px", background: "var(--surface-sunken)", borderRadius: "var(--r-md)", fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".1em", color: "var(--ink-3)", marginBottom: 4 }}>Mensaje final</div>
+                {branding.thankYou || "Gracias por completar la evaluación."}
+              </div>
             </div>
           </div>
-        </div>
+        ) : (
+          <div className="card" style={{ overflow: "hidden", borderRadius: "var(--r-lg)" }}>
+            <div style={{ height: 6, background: accent }} />
+            <div style={{ padding: "20px 20px 22px", textAlign: "center" }}>
+              {branding.logoUrl && (
+                /* eslint-disable-next-line @next/next/no-img-element */
+                <img src={branding.logoUrl} alt="Logo" style={{ maxHeight: 34, maxWidth: 120, objectFit: "contain", marginBottom: 10 }} />
+              )}
+              <div style={{ fontSize: 12, fontWeight: 700, color: "var(--ink-3)", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 12 }}>Tu resultado</div>
+              <ScoreRing value={78} size={110} label="Global" />
+              <p style={{ fontSize: 13, color: "var(--ink-2)", lineHeight: 1.5, marginTop: 14 }}>
+                {branding.thankYou || "Gracias por completar la evaluación."}
+              </p>
+              {branding.showBenchmark && (
+                <div style={{ marginTop: 12, padding: "9px 12px", background: "var(--surface-sunken)", borderRadius: "var(--r-sm)", fontSize: 12.5, color: "var(--ink-2)", fontWeight: 600 }}>
+                  Tu puntaje: 78 · Promedio general: 64
+                </div>
+              )}
+              {branding.ctaLabel && (
+                <div style={{ marginTop: 16 }}>
+                  <button type="button" className="btn btn-sm" style={{ background: accent, color: "#fff", fontSize: 13 }}>
+                    {branding.ctaLabel}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
+// ---- Validation ----
+type Issue = { key: string; label: string; targetId: string; fallbackId?: string; tab: TabId };
+
+function computeIssues(test: TestSummary | null): Issue[] {
+  if (!test) return [];
+  const list: Issue[] = [];
+  if (!test.name?.trim()) {
+    list.push({ key: "name", label: "El cuestionario no tiene nombre", targetId: "builder-name", tab: "temas" });
+  }
+  (test.topics || []).forEach((t) => {
+    const tName = t.name?.trim() || "Sin nombre";
+    if (t.questions.length === 0) {
+      list.push({ key: `t0-${t.id}`, label: `El tema "${tName}" no tiene preguntas`, targetId: t.id, tab: "temas" });
+    }
+    if (t.scoring === "weighted" && t.questions.length > 0 && t.questions.every((q) => q.options.every((o) => !o.points))) {
+      list.push({ key: `tw-${t.id}`, label: `Todas las opciones del tema "${tName}" valen 0 puntos`, targetId: t.id, tab: "temas" });
+    }
+    t.questions.forEach((q, qi) => {
+      if (!q.text?.trim()) {
+        list.push({ key: `qt-${q.id}`, label: `La pregunta ${qi + 1} de "${tName}" no tiene texto`, targetId: q.id, fallbackId: t.id, tab: "temas" });
+      }
+      if (q.options.length < 2) {
+        list.push({ key: `qo-${q.id}`, label: `La pregunta ${qi + 1} de "${tName}" tiene menos de 2 opciones`, targetId: q.id, fallbackId: t.id, tab: "temas" });
+      }
+    });
+  });
+  (test.solutions || []).forEach((s) => {
+    const sName = s.name?.trim() || "Sin nombre";
+    const conds = s.conditions || [];
+    if (conds.length === 0 && s.threshold == null) {
+      list.push({ key: `sc-${s.id}`, label: `La solución "${sName}" no tiene condiciones de activación`, targetId: s.id, tab: "soluciones" });
+    }
+    if (conds.some((c) => c.scope === "topic" && !c.topicId)) {
+      list.push({ key: `st-${s.id}`, label: `La solución "${sName}" tiene una condición sin tema seleccionado`, targetId: s.id, tab: "soluciones" });
+    }
+    if (s.link && ((s.link.label && !s.link.url) || (!s.link.label && s.link.url))) {
+      list.push({ key: `sl-${s.id}`, label: `El enlace de la solución "${sName}" está incompleto (falta texto o URL)`, targetId: s.id, tab: "soluciones" });
+    }
+  });
+  return list;
+}
+
+function IssueList({ issues, onJump }: { issues: Issue[]; onJump: (i: Issue) => void }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+      {issues.map((i) => (
+        <button
+          key={i.key}
+          type="button"
+          onClick={() => onJump(i)}
+          style={{ display: "flex", alignItems: "flex-start", gap: 8, width: "100%", textAlign: "left", padding: "8px 10px", fontSize: 13, color: "var(--ink)", background: "none", border: "none", borderRadius: "var(--r-xs)", cursor: "pointer", lineHeight: 1.4 }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = "var(--surface-sunken)")}
+          onMouseLeave={(e) => (e.currentTarget.style.background = "none")}
+        >
+          <Icon name="alert" size={14} style={{ color: "var(--warn)", flex: "none", marginTop: 1 }} />
+          <span style={{ flex: 1 }}>{i.label}</span>
+          <Icon name="chevronRight" size={13} style={{ color: "var(--ink-4)", flex: "none", marginTop: 2 }} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---- Version history ----
+type VersionRow = {
+  id: string; version: number; name: string; publishedAt: string | null;
+  topicCount: number; questionCount: number; solutionCount: number;
+  topics: Topic[]; solutions: Solution[];
+};
+
+function versionDiff(cur: VersionRow, prev: VersionRow | undefined): string {
+  if (!prev) return "Primera versión publicada";
+  const parts: string[] = [];
+  const dt = cur.topicCount - prev.topicCount;
+  const dq = cur.questionCount - prev.questionCount;
+  const ds = cur.solutionCount - prev.solutionCount;
+  if (dt) parts.push(`${dt > 0 ? "+" : "−"}${Math.abs(dt)} tema${Math.abs(dt) !== 1 ? "s" : ""}`);
+  if (dq) parts.push(`${dq > 0 ? "+" : "−"}${Math.abs(dq)} pregunta${Math.abs(dq) !== 1 ? "s" : ""}`);
+  if (ds) parts.push(`${ds > 0 ? "+" : "−"}${Math.abs(ds)} solu${Math.abs(ds) !== 1 ? "ciones" : "ción"}`);
+  return parts.length ? parts.join(", ") : "Cambios en el contenido";
+}
+
+function VersionsDrawer({ open, onClose, testId, onRestore }: {
+  open: boolean; onClose: () => void; testId: string; onRestore: (v: VersionRow) => void;
+}) {
+  const [versions, setVersions] = useState<VersionRow[] | null>(null);
+  const [error, setError] = useState(false);
+  const [restoreTarget, setRestoreTarget] = useState<VersionRow | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    let alive = true;
+    setVersions(null);
+    setError(false);
+    fetch(`/api/tests/${testId}/versions`)
+      .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+      .then((data) => { if (alive) setVersions(Array.isArray(data) ? data : []); })
+      .catch(() => { if (alive) { setVersions([]); setError(true); } });
+    return () => { alive = false; };
+  }, [open, testId]);
+
+  return (
+    <Drawer open={open} onClose={onClose} width={520} title="Historial de versiones" sub="Cada publicación con cambios crea una versión inmutable del instrumento.">
+      {versions === null ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {[0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 84, borderRadius: "var(--r-md)" }} />)}
+        </div>
+      ) : error ? (
+        <EmptyState icon="alert" title="Error al cargar" sub="No se pudo obtener el historial de versiones. Intenta de nuevo." />
+      ) : versions.length === 0 ? (
+        <EmptyState icon="history" title="Sin versiones" sub="Publica el cuestionario para crear la primera versión." />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {versions.map((v, i) => (
+            <div key={v.id} className="card" style={{ padding: "14px 16px" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+                <span className="badge mono" style={{ flex: "none", marginTop: 2 }}>v{v.version}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="clamp-1" style={{ fontWeight: 700, fontSize: 14, color: "var(--ink)" }}>{v.name}</div>
+                  <div style={{ fontSize: 12.5, color: "var(--ink-3)", marginTop: 3, display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                    <Icon name="clock" size={12} />
+                    {v.publishedAt ? `${new Date(v.publishedAt).toLocaleDateString("es", { day: "numeric", month: "short", year: "numeric" })} · ${timeAgo(v.publishedAt)}` : "—"}
+                  </div>
+                  <div style={{ fontSize: 12.5, color: "var(--ink-2)", marginTop: 5 }}>
+                    {v.topicCount} tema{v.topicCount !== 1 ? "s" : ""} · {v.questionCount} pregunta{v.questionCount !== 1 ? "s" : ""} · {v.solutionCount} solución{v.solutionCount !== 1 ? "es" : ""}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--primary)", marginTop: 4 }}>
+                    {versionDiff(v, versions[i + 1])}
+                  </div>
+                </div>
+                <button type="button" className="btn btn-secondary btn-sm" style={{ flex: "none" }} onClick={() => setRestoreTarget(v)}>
+                  <Icon name="refresh" size={13} /> Restaurar
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <ConfirmModal
+        open={!!restoreTarget}
+        onClose={() => setRestoreTarget(null)}
+        onConfirm={() => {
+          if (restoreTarget) onRestore(restoreTarget);
+          setRestoreTarget(null);
+          onClose();
+        }}
+        title={`Restaurar versión v${restoreTarget?.version ?? ""}`}
+        message={`Se copiarán los temas y soluciones de la versión v${restoreTarget?.version ?? ""} al borrador actual, reemplazando el contenido sin publicar. Esto no cambia lo que ven los respondentes: para que aplique, deberás volver a publicar el cuestionario.`}
+        confirmLabel="Restaurar"
+        danger={false}
+      />
+    </Drawer>
+  );
+}
+
 // ---- Main builder ----
+const HISTORY_LIMIT = 50;
+const HISTORY_GROUP_MS = 700;
+// Fields the PATCH endpoint accepts and that undo/redo should restore.
+const SNAPSHOT_FIELDS = ["name", "tags", "description", "accent", "topics", "solutions", "branding"] as const;
+
+function snapshotPatch(snap: TestSummary): Partial<TestSummary> {
+  const patch: Partial<TestSummary> = {};
+  for (const f of SNAPSHOT_FIELDS) {
+    (patch as Record<string, unknown>)[f] = snap[f];
+  }
+  return patch;
+}
+
 export default function BuilderPage({ testId, nav, toast }: { testId: string; nav: NavFn; toast: ToastFn }) {
   const store = useStore();
   const storeTest = store.getTest(testId);
   const [test, setTest] = useState<TestSummary | null>(storeTest || null);
   const [tab, setTab] = useState<TabId>("temas");
   const [shareOpen, setShareOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [validOpen, setValidOpen] = useState(false);
+  const [kbdOpen, setKbdOpen] = useState(false);
+  const [publishWarnOpen, setPublishWarnOpen] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingPatch = useRef<Partial<TestSummary>>({});
+
+  // Autosave indicator
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => setTick((x) => x + 1), 10000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Undo/redo history
+  const testRef = useRef<TestSummary | null>(storeTest || null);
+  const undoStack = useRef<TestSummary[]>([]);
+  const redoStack = useRef<TestSummary[]>([]);
+  const lastEditAt = useRef(0);
+  const [, bumpHist] = useState(0);
 
   // Sync from store when it refreshes (only when no pending local changes)
   useEffect(() => {
     if (storeTest && !saveTimer.current) {
+      testRef.current = storeTest;
       setTest(storeTest);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -968,7 +1716,10 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
 
   // Init from store on first load
   useEffect(() => {
-    if (!test && storeTest) setTest(storeTest);
+    if (!test && storeTest) {
+      testRef.current = storeTest;
+      setTest(storeTest);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -980,19 +1731,108 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
       saveTimer.current = null;
       const toSave = { ...pendingPatch.current };
       pendingPatch.current = {};
+      setSaveState("saving");
       try {
         await store.updateTest(testId, toSave);
-        toast("Guardado", "check2");
+        setSaveState("saved");
+        setLastSavedAt(new Date());
       } catch {
+        setSaveState("error");
         toast("Error al guardar", "alert");
       }
     }, delay);
   }, [store, testId, toast]);
 
-  const handleUpdate = useCallback((patch: Partial<TestSummary>, immediate = false) => {
-    setTest((prev) => prev ? { ...prev, ...patch } : prev);
+  const handleUpdate = useCallback((patch: Partial<TestSummary>, immediate = false, record = true) => {
+    const prev = testRef.current;
+    if (!prev) return;
+    if (record) {
+      const now = Date.now();
+      // Group rapid edits (typing) into a single history entry.
+      if (undoStack.current.length === 0 || now - lastEditAt.current > HISTORY_GROUP_MS) {
+        undoStack.current.push(JSON.parse(JSON.stringify(prev)) as TestSummary);
+        if (undoStack.current.length > HISTORY_LIMIT) undoStack.current.shift();
+      }
+      redoStack.current = [];
+      lastEditAt.current = now;
+      bumpHist((x) => x + 1);
+    }
+    const next = { ...prev, ...patch };
+    testRef.current = next;
+    setTest(next);
     scheduleSave(patch, immediate);
   }, [scheduleSave]);
+
+  const applySnapshot = useCallback((snap: TestSummary, cur: TestSummary) => {
+    // Preserve non-content fields (status, counters, invitations) from the current state.
+    const merged: TestSummary = {
+      ...snap,
+      status: cur.status,
+      archived: cur.archived,
+      invitations: cur.invitations,
+      _latestVersion: cur._latestVersion,
+      _responseCount: cur._responseCount,
+      _avgScore: cur._avgScore,
+    };
+    testRef.current = merged;
+    setTest(merged);
+    lastEditAt.current = 0; // the next edit starts a fresh history entry
+    scheduleSave(snapshotPatch(merged));
+    bumpHist((x) => x + 1);
+  }, [scheduleSave]);
+
+  const undo = useCallback(() => {
+    const cur = testRef.current;
+    const snap = undoStack.current.pop();
+    if (!snap || !cur) return;
+    redoStack.current.push(JSON.parse(JSON.stringify(cur)) as TestSummary);
+    applySnapshot(snap, cur);
+  }, [applySnapshot]);
+
+  const redo = useCallback(() => {
+    const cur = testRef.current;
+    const snap = redoStack.current.pop();
+    if (!snap || !cur) return;
+    undoStack.current.push(JSON.parse(JSON.stringify(cur)) as TestSummary);
+    applySnapshot(snap, cur);
+  }, [applySnapshot]);
+
+  // Keyboard shortcuts (skip while typing in form fields)
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const el = e.target as HTMLElement | null;
+      const tag = el?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      const k = e.key.toLowerCase();
+      if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }
+      else if ((k === "z" && e.shiftKey) || k === "y") { e.preventDefault(); redo(); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [undo, redo]);
+
+  // Live validation
+  const issues = useMemo(() => computeIssues(test), [test]);
+
+  const jumpToIssue = useCallback((issue: Issue) => {
+    setValidOpen(false);
+    setPublishWarnOpen(false);
+    setTab(issue.tab);
+    setTimeout(() => {
+      const el = document.querySelector(`[data-builder-id="${issue.targetId}"]`)
+        || (issue.fallbackId ? document.querySelector(`[data-builder-id="${issue.fallbackId}"]`) : null);
+      if (!el) return;
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("pulse-highlight");
+      setTimeout(() => el.classList.remove("pulse-highlight"), 2400);
+    }, 140);
+  }, []);
+
+  const restoreVersion = useCallback((v: VersionRow) => {
+    handleUpdate({ topics: v.topics, solutions: v.solutions }, true);
+    toast(`Versión v${v.version} restaurada al borrador`, "history");
+  }, [handleUpdate, toast]);
 
   if (!test) {
     return (
@@ -1012,32 +1852,112 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
   ];
 
   const shareUrl = typeof window !== "undefined" ? `${window.location.origin}/q/${testId}` : `/q/${testId}`;
+  const canUndo = undoStack.current.length > 0;
+  const canRedo = redoStack.current.length > 0;
+
+  const popoverCard: React.CSSProperties = {
+    position: "absolute", top: "calc(100% + 6px)", right: 0, zIndex: 60,
+    width: 340, maxHeight: 380, overflowY: "auto", padding: 8, boxShadow: "var(--sh-md)",
+  };
+  const overlay: React.CSSProperties = { position: "fixed", inset: 0, zIndex: 55, background: "transparent" };
 
   return (
     <PageWrap maxWidth="var(--maxw)">
       {/* Header */}
-      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 24, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24, flexWrap: "wrap" }}>
         <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={() => nav("dashboard")} title="Volver">
           <Icon name="back" size={17} />
         </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div data-builder-id="builder-name" style={{ flex: 1, minWidth: 200 }}>
           <InlineInput
             value={test.name}
             onChange={(v) => handleUpdate({ name: v })}
             placeholder="Nombre del cuestionario"
-            style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-.02em" }}
+            style={{ fontSize: 22, fontWeight: 800, letterSpacing: "-.02em", width: "100%" }}
           />
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, flex: "none" }}>
-          {test._latestVersion != null && (
-            <span className="badge mono" title="Versión publicada del instrumento" style={{ fontSize: 11 }}>
-              v{test._latestVersion}
-            </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flex: "none", flexWrap: "wrap" }}>
+          {/* Autosave indicator */}
+          <span className="hide-mobile" style={{ fontSize: 12, fontWeight: 600, color: saveState === "error" ? "var(--bad)" : "var(--ink-3)", display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0 }}>
+            {saveState === "saving" && (<><Icon name="refresh" size={12} /> Guardando…</>)}
+            {saveState === "saved" && lastSavedAt && (<><Icon name="check2" size={12} /> Guardado {timeAgo(lastSavedAt)}</>)}
+            {saveState === "error" && (<><Icon name="alert" size={12} /> Error al guardar</>)}
+          </span>
+
+          {/* Validation chip */}
+          {issues.length > 0 && (
+            <div style={{ position: "relative" }}>
+              <button
+                type="button"
+                className="badge badge-warn"
+                onClick={() => setValidOpen((o) => !o)}
+                style={{ cursor: "pointer", border: "none", display: "inline-flex", alignItems: "center", gap: 5 }}
+                title="Ver pendientes de revisión"
+              >
+                <Icon name="alert" size={12} /> {issues.length} pendiente{issues.length !== 1 ? "s" : ""}
+              </button>
+              {validOpen && (
+                <>
+                  <div style={overlay} onClick={() => setValidOpen(false)} />
+                  <div className="card" style={popoverCard}>
+                    <div className="eyebrow" style={{ padding: "6px 10px 8px" }}>Pendientes de revisión</div>
+                    <IssueList issues={issues} onJump={jumpToIssue} />
+                  </div>
+                </>
+              )}
+            </div>
           )}
+
+          {/* Undo / redo */}
+          <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={undo} disabled={!canUndo} title="Deshacer (Ctrl+Z)">
+            <Icon name="arrowLeft" size={15} />
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={redo} disabled={!canRedo} title="Rehacer (Ctrl+Shift+Z)">
+            <Icon name="arrowRight" size={15} />
+          </button>
+
+          {/* Keyboard hint */}
+          <div style={{ position: "relative" }} className="hide-mobile">
+            <button type="button" className="btn btn-ghost btn-sm btn-icon" onClick={() => setKbdOpen((o) => !o)} title="Atajos de teclado">
+              <Icon name="keyboard" size={15} />
+            </button>
+            {kbdOpen && (
+              <>
+                <div style={overlay} onClick={() => setKbdOpen(false)} />
+                <div className="card" style={{ ...popoverCard, width: 280, padding: "12px 14px" }}>
+                  <div className="eyebrow" style={{ marginBottom: 10 }}>Atajos de teclado</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, fontSize: 12.5, color: "var(--ink-2)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span>Deshacer</span><span><span className="kbd">Ctrl</span> <span className="kbd">Z</span></span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span>Rehacer</span><span><span className="kbd">Ctrl</span> <span className="kbd">⇧</span> <span className="kbd">Z</span></span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <span>Nueva opción (en una opción)</span><span className="kbd">Enter</span>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Version history */}
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setHistoryOpen(true)} title="Historial de versiones publicadas">
+            <Icon name="history" size={14} /> Historial
+            {test._latestVersion != null && (
+              <span className="badge mono" style={{ fontSize: 10.5, marginLeft: 2 }}>v{test._latestVersion}</span>
+            )}
+          </button>
+
           <Seg
             options={[{ label: "Borrador", value: "borrador" }, { label: "Publicado", value: "publicado" }]}
             value={test.status || "borrador"}
-            onChange={(v) => handleUpdate({ status: v }, true)}
+            onChange={(v) => {
+              if (v === (test.status || "borrador")) return;
+              if (v === "publicado" && issues.length > 0) { setPublishWarnOpen(true); return; }
+              handleUpdate({ status: v }, true, false);
+            }}
           />
           <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShareOpen(true)}>
             <Icon name="share" size={14} /> Compartir
@@ -1081,10 +2001,10 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
       </div>
 
       {/* Tab content */}
-      {tab === "temas" && <TemasTab test={test} onUpdate={(patch) => handleUpdate(patch)} />}
+      {tab === "temas" && <TemasTab test={test} onUpdate={(patch) => handleUpdate(patch)} toast={toast} />}
       {tab === "soluciones" && <SolucionesTab test={test} onUpdate={(patch) => handleUpdate(patch, true)} />}
       {tab === "distribucion" && <DistribucionTab test={test} testId={testId} toast={toast} onShare={() => setShareOpen(true)} />}
-      {tab === "marca" && <MarcaTab test={test} onUpdate={(patch) => handleUpdate(patch)} />}
+      {tab === "marca" && <MarcaTab test={test} onUpdate={(patch) => handleUpdate(patch)} toast={toast} />}
 
       <ShareModal
         open={shareOpen}
@@ -1094,6 +2014,42 @@ export default function BuilderPage({ testId, nav, toast }: { testId: string; na
         accent={test.branding?.accent || test.accent}
         toast={toast}
       />
+
+      <VersionsDrawer
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        testId={testId}
+        onRestore={restoreVersion}
+      />
+
+      {/* Publish-with-issues confirmation */}
+      <Modal
+        open={publishWarnOpen}
+        onClose={() => setPublishWarnOpen(false)}
+        width={520}
+        title="Revisión antes de publicar"
+        sub={`Hay ${issues.length} pendiente${issues.length !== 1 ? "s" : ""} de revisión. Puedes publicar de todos modos o revisarlos primero.`}
+      >
+        <div style={{ maxHeight: 300, overflowY: "auto", margin: "4px 0 16px" }}>
+          <IssueList issues={issues} onJump={jumpToIssue} />
+        </div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button type="button" className="btn btn-secondary btn-sm" onClick={() => setPublishWarnOpen(false)}>
+            Revisar
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            onClick={() => {
+              setPublishWarnOpen(false);
+              handleUpdate({ status: "publicado" }, true, false);
+              toast("Cuestionario publicado", "check2");
+            }}
+          >
+            Publicar de todos modos
+          </button>
+        </div>
+      </Modal>
     </PageWrap>
   );
 }

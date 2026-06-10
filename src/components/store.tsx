@@ -7,7 +7,7 @@ import type { Solution, Branding } from "@/lib/schema";
 // ---- types ----
 export type TestSummary = {
   id: string; mode: string; name: string; domain?: string; tags: string[];
-  description?: string; status: string; accent: string;
+  description?: string; status: string; archived?: boolean; accent: string;
   topics: import("@/lib/schema").Topic[];
   solutions: Solution[];
   branding?: Branding | null;
@@ -26,20 +26,31 @@ export type ResponseRow = {
 export type InvitationRow = {
   id: string; testId: string; name?: string; email?: string;
   company?: string; status: string; sentAt?: string | null;
+  openedAt?: string | null;
   lastReminderAt?: string | null;
 };
+
+export type ActionCommentRow = { id: string; text: string; author?: string; at: string };
 
 export type TaskActionRow = {
   id: string; testId: string; solutionId: string;
   entityName: string; status: string; assignee?: string | null;
   dueDate?: string | null; priority?: string | null;
+  comments?: ActionCommentRow[];
+  updatedAt?: string | null;
 };
+
+export type CurrentUser = { sub: string; role: "admin" | "consultor" | "viewer"; name?: string | null; company?: string | null };
 
 // ---- context ----
 type StoreCtx = {
   mode: ModeId;
   modeConfig: ModeConfig;
   setMode: (id: ModeId) => void;
+  // Current user (from /api/auth/me) — null until loaded
+  me: CurrentUser | null;
+  // True until the first tests+responses fetch completes (for skeleton loaders)
+  loading: boolean;
   // Tests
   tests: TestSummary[];
   refreshTests: () => Promise<void>;
@@ -82,9 +93,19 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [tests, setTests] = useState<TestSummary[]>([]);
   const [responses, setResponses] = useState<ResponseRow[]>([]);
   const [taskActions, setTaskActions] = useState<TaskActionRow[]>([]);
+  const [me, setMe] = useState<CurrentUser | null>(null);
+  const [loading, setLoading] = useState(true);
 
   // hydrate mode from localStorage after mount
   useEffect(() => { setModeState(getModeLS()); }, []);
+
+  // current user for greeting / role-aware UI
+  useEffect(() => {
+    fetch("/api/auth/me")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((u) => setMe(u))
+      .catch(() => {});
+  }, []);
 
   const setMode = useCallback((id: ModeId) => {
     setModeState(id);
@@ -94,6 +115,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   const refreshTests = useCallback(async () => {
     const res = await fetch(`/api/tests?mode=${mode}`);
     if (res.ok) setTests(await res.json());
+    setLoading(false);
   }, [mode]);
 
   const refreshResponses = useCallback(async () => {
@@ -218,7 +240,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <StoreContext.Provider value={{
-      mode, modeConfig: MODE_CONFIG[mode], setMode,
+      mode, modeConfig: MODE_CONFIG[mode], setMode, me, loading,
       tests, refreshTests, getTest, createTest, updateTest, duplicateTest, deleteTest,
       responses, refreshResponses, addResponse, deleteResponse,
       addInvitation, updateInvitation, deleteInvitation, sendInvitation, sendPendingInvitations,

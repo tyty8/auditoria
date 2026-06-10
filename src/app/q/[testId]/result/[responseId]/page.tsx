@@ -3,7 +3,7 @@ import { db } from "@/lib/db";
 import { tests, responses } from "@/lib/schema";
 import { eq } from "drizzle-orm";
 import { notFound } from "next/navigation";
-import { computeResult } from "@/lib/scoring";
+import { computeResult, computeOverallScore } from "@/lib/scoring";
 import ResultView from "@/components/result-view";
 
 export default async function ResultPage({
@@ -25,6 +25,23 @@ export default async function ResultPage({
 
   const result = computeResult(topics, solutions, answers);
 
+  // Benchmark: average overall score across ALL responses for this test
+  // (only computed when the branding opts in — keeps the common path light).
+  let average: number | null = null;
+  if (test.branding?.showBenchmark) {
+    const rows = await db
+      .select({ answers: responses.answers })
+      .from(responses)
+      .where(eq(responses.testId, testId));
+    if (rows.length > 0) {
+      const sum = rows.reduce(
+        (s, r) => s + computeOverallScore(topics, (r.answers as Record<string, string>) || {}),
+        0
+      );
+      average = Math.round(sum / rows.length);
+    }
+  }
+
   return (
     <main style={{ minHeight: "100vh", background: "var(--bg)" }}>
       <ResultView
@@ -32,6 +49,10 @@ export default async function ResultPage({
         result={result}
         respondent={response.respondent}
         company={response.company}
+        answers={answers}
+        responseId={response.id}
+        responseEmail={response.email}
+        average={average}
       />
     </main>
   );
